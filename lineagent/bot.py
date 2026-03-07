@@ -16,6 +16,7 @@ from linebot.v3.webhooks import (
 from secretary_agent.audio_transcriber import AssemblyAIAudioTranscriber, AudioTranscriptionError
 from secretary_agent.config import Settings
 from secretary_agent.memory import SQLiteStore
+from secretary_agent.logging_utils import format_log_event
 from secretary_agent.runtime import SecretaryRuntime
 from secretary_agent.transport_line import (
     LineMessenger,
@@ -30,6 +31,7 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 logger = logging.getLogger("lineagent.bot")
+USER_SAFE_SYSTEM_ERROR_TEXT = "系統有錯誤，已通知 IT 處理，請稍後再試。"
 
 
 settings = Settings.from_env()
@@ -59,7 +61,7 @@ def callback():
     except InvalidSignatureError:
         abort(400)
     except Exception:
-        logger.exception("Unhandled exception while processing LINE callback")
+        logger.exception(format_log_event("callback_unhandled_exception"))
         abort(500)
     return "OK"
 
@@ -96,9 +98,29 @@ def on_file_message(event: MessageEvent):
 
 
 def _start_media_processing(event: MessageEvent):
+    message_id = getattr(event.message, "id", "")
+    source_id = get_push_target_id(event.source)
+    user_id = getattr(event.source, "user_id", None)
     if audio_transcriber is None:
-        messenger.reply_text(event.reply_token, "目前未啟用語音逐字稿服務，請改用文字輸入。")
+        logger.error(
+            format_log_event(
+                "media_transcriber_missing",
+                message_id=message_id,
+                source_id=source_id,
+                user_id=user_id,
+            )
+        )
+        messenger.reply_text(event.reply_token, USER_SAFE_SYSTEM_ERROR_TEXT)
         return
+    logger.info(
+        format_log_event(
+            "media_ack_sent",
+            message_id=message_id,
+            message_type=getattr(event.message, "type", ""),
+            source_id=source_id,
+            user_id=user_id,
+        )
+    )
     messenger.reply_text(
         event.reply_token,
         "已收到語音，正在轉錄並整理重點，完成後我會主動推送給你。",
@@ -108,22 +130,53 @@ def _start_media_processing(event: MessageEvent):
 
 def _handle_media_message(event: MessageEvent):
     push_target_id = get_push_target_id(event.source)
+    message_id = getattr(event.message, "id", "")
+    source_id = push_target_id
+    user_id = getattr(event.source, "user_id", None)
     if not push_target_id:
-        logger.error("Missing push target for media message id=%s", getattr(event.message, "id", ""))
+        logger.error(
+            format_log_event(
+                "media_missing_push_target",
+                message_id=message_id,
+                user_id=user_id,
+            )
+        )
         return
     if audio_transcriber is None:
-        messenger.push_text(push_target_id, "目前未啟用語音逐字稿服務，請改用文字輸入。")
+        logger.error(
+            format_log_event(
+                "media_transcriber_missing_runtime",
+                message_id=message_id,
+                source_id=source_id,
+                user_id=user_id,
+            )
+        )
+        messenger.push_text(push_target_id, USER_SAFE_SYSTEM_ERROR_TEXT)
         return
     try:
         filename, mime_type = infer_media_metadata(event.message)
         logger.info(
-            "Processing media message id=%s type=%s filename=%s mime=%s",
-            getattr(event.message, "id", ""),
-            getattr(event.message, "type", ""),
-            filename,
-            mime_type,
+            format_log_event(
+                "media_processing_started",
+                message_id=message_id,
+                message_type=getattr(event.message, "type", ""),
+                filename=filename,
+                mime=mime_type,
+                source_id=source_id,
+                user_id=user_id,
+            )
         )
         if not mime_type.startswith("audio/") and mime_type != "application/octet-stream":
+            logger.warning(
+                format_log_event(
+                    "media_unsupported_format",
+                    message_id=message_id,
+                    filename=filename,
+                    mime=mime_type,
+                    source_id=source_id,
+                    user_id=user_id,
+                )
+            )
             messenger.push_text(
                 push_target_id,
                 "這個檔案不是可辨識的音訊格式，請改傳 LINE 語音、mp3、m4a 或 wav。",
@@ -133,29 +186,76 @@ def _handle_media_message(event: MessageEvent):
             event.message.id,
             message_type=getattr(event.message, "type", ""),
         )
-        logger.info("Downloaded media bytes=%s for message id=%s", len(audio_bytes), getattr(event.message, "id", ""))
+        logger.info(
+            format_log_event(
+                "media_downloaded",
+                message_id=message_id,
+                bytes=len(audio_bytes),
+                source_id=source_id,
+                user_id=user_id,
+            )
+        )
         transcript = audio_transcriber.transcribe_to_prompt(
             audio_bytes=audio_bytes,
             filename=filename or f"{event.message.id}.bin",
             mime_type=mime_type,
         )
+        logger.info(
+            format_log_event(
+                "media_transcription_completed",
+                message_id=message_id,
+                transcript_chars=len(transcript or ""),
+                source_id=source_id,
+                user_id=user_id,
+            )
+        )
     except AudioTranscriptionError as err:
-        logger.warning("Audio transcription failed: %s", err)
-        messenger.push_text(push_target_id, f"語音轉文字失敗：{err}")
+        logger.exception(
+            format_log_event(
+                "media_transcription_failed",
+                message_id=message_id,
+                source_id=source_id,
+                user_id=user_id,
+                error_type=type(err).__name__,
+            )
+        )
+        messenger.push_text(push_target_id, USER_SAFE_SYSTEM_ERROR_TEXT)
         return
     except Exception as err:
-        logger.exception("Unexpected media processing failure")
-        messenger.push_text(
-            push_target_id,
-            f"語音處理失敗：{err.__class__.__name__}: {str(err)[:180]}",
+        logger.exception(
+            format_log_event(
+                "media_processing_failed",
+                message_id=message_id,
+                source_id=source_id,
+                user_id=user_id,
+                error_type=type(err).__name__,
+            )
         )
+        messenger.push_text(push_target_id, USER_SAFE_SYSTEM_ERROR_TEXT)
         return
 
     if not transcript:
-        messenger.push_text(push_target_id, "語音轉文字失敗，請再試一次或改用文字輸入。")
+        logger.error(
+            format_log_event(
+                "media_transcription_empty",
+                message_id=message_id,
+                source_id=source_id,
+                user_id=user_id,
+            )
+        )
+        messenger.push_text(push_target_id, USER_SAFE_SYSTEM_ERROR_TEXT)
         return
 
     inbound = normalize_line_message(event, text_override=transcript, reply_enabled=False)
+    logger.info(
+        format_log_event(
+            "media_runtime_dispatch",
+            message_id=message_id,
+            memory_key=inbound.memory_key,
+            source_id=source_id,
+            user_id=user_id,
+        )
+    )
     runtime.handle_inbound_message(inbound)
 
 

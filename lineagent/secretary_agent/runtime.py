@@ -1,3 +1,4 @@
+import logging
 import time
 from threading import Event, Thread
 from typing import Any, Dict, List, Optional
@@ -5,6 +6,7 @@ from typing import Any, Dict, List, Optional
 from secretary_agent.config import Settings
 from secretary_agent.artifact_generator import ArtifactGenerator
 from secretary_agent.dify_client import DifyAgentClient
+from secretary_agent.logging_utils import format_log_event
 from secretary_agent.memory import SQLiteStore
 from secretary_agent.models import InboundMessage, PlannerResult, TaskRun
 from secretary_agent.utils import (
@@ -42,6 +44,7 @@ class SecretaryRuntime:
         )
         self.stop_event = Event()
         self.worker: Optional[Thread] = None
+        self.logger = logging.getLogger("lineagent.runtime")
 
     def start(self) -> None:
         if self.worker and self.worker.is_alive():
@@ -50,14 +53,42 @@ class SecretaryRuntime:
         self.worker.start()
 
     def handle_inbound_message(self, inbound: InboundMessage) -> None:
+        self.logger.info(
+            format_log_event(
+                "inbound_received",
+                memory_key=inbound.memory_key,
+                source_type=inbound.source_type,
+                source_id=inbound.source_id,
+                user_id=inbound.user_id,
+                line_event_id=inbound.line_event_id,
+                quoted_message_id=inbound.quoted_message_id,
+                reply_enabled=inbound.reply_enabled,
+            )
+        )
         self.store.prune_short_context(inbound.memory_key, self.settings.short_context_ttl_days)
         text = inbound.text.strip()
         if not text:
+            self.logger.info(
+                format_log_event(
+                    "inbound_empty_text",
+                    memory_key=inbound.memory_key,
+                    source_id=inbound.source_id,
+                    user_id=inbound.user_id,
+                )
+            )
             self._respond_immediate(inbound, "請直接告訴我你要我協助的事情。")
             return
 
         if text.lower() in RESET_COMMANDS or text in RESET_COMMANDS:
             self.store.clear_memory(inbound.memory_key)
+            self.logger.info(
+                format_log_event(
+                    "memory_reset",
+                    memory_key=inbound.memory_key,
+                    source_id=inbound.source_id,
+                    user_id=inbound.user_id,
+                )
+            )
             self._send_immediate_without_history(inbound, "已清除這個 LINE 身分的對話與偏好記憶。")
             return
 
@@ -78,6 +109,16 @@ class SecretaryRuntime:
                 int(pending["run_id"]),
                 status="queued",
                 current_phase="approval_resolved",
+            )
+            self.logger.info(
+                format_log_event(
+                    "approval_resolved",
+                    run_id=pending["run_id"],
+                    approval_id=pending["id"],
+                    memory_key=inbound.memory_key,
+                    source_id=inbound.source_id,
+                    user_id=inbound.user_id,
+                )
             )
             self._respond_immediate(inbound, "收到你的回覆，我繼續處理並整理結果。")
             return
@@ -103,6 +144,17 @@ class SecretaryRuntime:
             ref_key=inbound.line_event_id,
             metadata={"quoted_text": quoted_text},
         )
+        self.logger.info(
+            format_log_event(
+                "task_queued",
+                run_id=run_id,
+                created=created,
+                memory_key=inbound.memory_key,
+                source_id=inbound.source_id,
+                user_id=inbound.user_id,
+                line_event_id=inbound.line_event_id,
+            )
+        )
         if created:
             ack = "任務已收到，我會先規劃並整理可執行方案，再把結果推送給你。"
         else:
@@ -114,6 +166,15 @@ class SecretaryRuntime:
         run = self.store.claim_next_run()
         if not run:
             return False
+        self.logger.info(
+            format_log_event(
+                "task_claimed",
+                run_id=run.id,
+                memory_key=run.memory_key,
+                status=run.status,
+                current_phase=run.current_phase,
+            )
+        )
         self._process_run(run)
         return True
 
@@ -125,6 +186,15 @@ class SecretaryRuntime:
 
     def _process_run(self, run: TaskRun) -> None:
         try:
+            self.logger.info(
+                format_log_event(
+                    "task_processing_started",
+                    run_id=run.id,
+                    memory_key=run.memory_key,
+                    task_type=run.task_type,
+                    current_phase=run.current_phase,
+                )
+            )
             self.store.prune_short_context(run.memory_key, self.settings.short_context_ttl_days)
             context = self.store.build_runtime_context(run.id, run.memory_key)
             planning_goal = self._build_planning_goal(run.user_goal, context)
@@ -139,6 +209,16 @@ class SecretaryRuntime:
                 memory_key=run.memory_key,
                 user_goal=planning_goal,
                 runtime_context=context,
+            )
+            self.logger.info(
+                format_log_event(
+                    "task_plan_completed",
+                    run_id=run.id,
+                    memory_key=run.memory_key,
+                    task_type=plan.task_type,
+                    requires_approval=plan.requires_approval,
+                    requested_outputs=",".join(plan.requested_outputs),
+                )
             )
             self.store.add_step(
                 run.id,
@@ -172,6 +252,15 @@ class SecretaryRuntime:
                 )
                 push_target = self._memory_key_to_push_target(run.memory_key)
                 message_ids = self.messenger.push_text(push_target, prompt)
+                self.logger.info(
+                    format_log_event(
+                        "task_waiting_approval",
+                        run_id=run.id,
+                        approval_id=approval_id,
+                        memory_key=run.memory_key,
+                        approval_type=plan.approval_type or "decision",
+                    )
+                )
                 self.store.store_bot_messages(message_ids, self.messenger.split_for_storage(prompt))
                 if message_ids:
                     self.store.set_approval_prompt_message(approval_id, message_ids[0])
@@ -180,6 +269,16 @@ class SecretaryRuntime:
 
             final_text = self._build_final_text(plan)
             generated_artifacts = self._generate_requested_artifacts(run.id, run.user_goal, plan, final_text)
+            if generated_artifacts:
+                self.logger.info(
+                    format_log_event(
+                        "artifacts_generated",
+                        run_id=run.id,
+                        memory_key=run.memory_key,
+                        artifact_count=len(generated_artifacts),
+                        formats=",".join(item["format"] for item in generated_artifacts),
+                    )
+                )
             if generated_artifacts:
                 if prefers_file_only_response(run.user_goal):
                     final_text = self._build_file_only_text(generated_artifacts)
@@ -197,9 +296,28 @@ class SecretaryRuntime:
             )
             push_target = self._memory_key_to_push_target(run.memory_key)
             message_ids = self.messenger.push_text(push_target, final_text)
+            self.logger.info(
+                format_log_event(
+                    "task_completed",
+                    run_id=run.id,
+                    memory_key=run.memory_key,
+                    task_type=plan.task_type,
+                    message_count=len(message_ids),
+                    final_chars=len(final_text),
+                )
+            )
             self.store.store_bot_messages(message_ids, self.messenger.split_for_storage(final_text))
             self.store.append_history(run.memory_key, "assistant", final_text)
         except Exception as err:
+            self.logger.exception(
+                format_log_event(
+                    "task_failed",
+                    run_id=run.id,
+                    memory_key=run.memory_key,
+                    current_phase=run.current_phase,
+                    error_type=type(err).__name__,
+                )
+            )
             self.store.add_step(
                 run.id,
                 step_type="plan",
@@ -355,6 +473,14 @@ class SecretaryRuntime:
 
     def _reply(self, reply_token: str, text: str, memory_key: str) -> None:
         message_ids = self.messenger.reply_text(reply_token, text)
+        self.logger.info(
+            format_log_event(
+                "reply_sent",
+                memory_key=memory_key,
+                message_count=len(message_ids),
+                chars=len(text),
+            )
+        )
         self.store.store_bot_messages(message_ids, self.messenger.split_for_storage(text))
         self.store.append_history(memory_key, "assistant", text)
 
@@ -363,6 +489,17 @@ class SecretaryRuntime:
             message_ids = self.messenger.reply_text(inbound.reply_token, text)
         else:
             message_ids = self.messenger.push_text(self._memory_key_to_push_target(inbound.memory_key), text)
+        self.logger.info(
+            format_log_event(
+                "immediate_message_sent",
+                memory_key=inbound.memory_key,
+                source_id=inbound.source_id,
+                user_id=inbound.user_id,
+                reply_enabled=inbound.reply_enabled,
+                message_count=len(message_ids),
+                chars=len(text),
+            )
+        )
         self.store.store_bot_messages(message_ids, self.messenger.split_for_storage(text))
 
     def _respond_immediate(self, inbound: InboundMessage, text: str) -> None:
@@ -370,6 +507,16 @@ class SecretaryRuntime:
             self._reply(inbound.reply_token, text, inbound.memory_key)
             return
         message_ids = self.messenger.push_text(self._memory_key_to_push_target(inbound.memory_key), text)
+        self.logger.info(
+            format_log_event(
+                "push_sent",
+                memory_key=inbound.memory_key,
+                source_id=inbound.source_id,
+                user_id=inbound.user_id,
+                message_count=len(message_ids),
+                chars=len(text),
+            )
+        )
         self.store.store_bot_messages(message_ids, self.messenger.split_for_storage(text))
         self.store.append_history(inbound.memory_key, "assistant", text)
 

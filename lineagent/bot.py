@@ -3,12 +3,12 @@ import os
 from flask import Flask, abort, request
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
-from linebot.v3.webhooks import AudioMessageContent, MessageEvent, TextMessageContent
+from linebot.v3.webhooks import AudioMessageContent, LocationMessageContent, MessageEvent, TextMessageContent
 
 from secretary_agent.config import Settings
 from secretary_agent.memory import SQLiteStore
 from secretary_agent.runtime import SecretaryRuntime
-from secretary_agent.transport_line import LineMessenger, normalize_line_message
+from secretary_agent.transport_line import LineMessenger, format_location_message, normalize_line_message
 
 
 settings = Settings.from_env()
@@ -59,6 +59,12 @@ def on_audio_message(event: MessageEvent):
         return
 
     inbound = normalize_line_message(event, text_override=transcript)
+    runtime.handle_inbound_message(inbound)
+
+
+@handler.add(MessageEvent, message=LocationMessageContent)
+def on_location_message(event: MessageEvent):
+    inbound = normalize_line_message(event, text_override=format_location_message(event.message))
     runtime.handle_inbound_message(inbound)
 
 

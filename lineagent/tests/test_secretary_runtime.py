@@ -5,7 +5,7 @@ import unittest
 from secretary_agent.memory import SQLiteStore
 from secretary_agent.models import InboundMessage, PlannerResult
 from secretary_agent.runtime import SecretaryRuntime
-from secretary_agent.transport_line import extract_sent_message_ids
+from secretary_agent.transport_line import extract_sent_message_ids, format_location_message
 from secretary_agent.utils import split_text
 
 
@@ -248,6 +248,18 @@ class SecretaryRuntimeTest(unittest.TestCase):
 
     def test_extract_sent_message_ids_handles_missing_response(self):
         self.assertEqual(extract_sent_message_ids(None), [])
+
+    def test_format_location_message_contains_address_and_coordinates(self):
+        class FakeLocation:
+            title = "目前位置"
+            address = "台北市信義區市府路 45 號"
+            latitude = 25.033968
+            longitude = 121.564468
+
+        text = format_location_message(FakeLocation())
+        self.assertIn("LINE 位置訊息", text)
+        self.assertIn("台北市信義區市府路 45 號", text)
+        self.assertIn("25.033968, 121.564468", text)
 
 
 if __name__ == "__main__":

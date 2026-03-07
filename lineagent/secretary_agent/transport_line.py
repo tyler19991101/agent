@@ -53,6 +53,24 @@ def normalize_line_message(event: Any, text_override: Optional[str] = None) -> I
     )
 
 
+def format_location_message(message: Any) -> str:
+    title = (getattr(message, "title", "") or "使用者位置").strip()
+    address = (getattr(message, "address", "") or "").strip()
+    latitude = getattr(message, "latitude", None)
+    longitude = getattr(message, "longitude", None)
+
+    lines = [
+        "使用者傳送了 LINE 位置訊息，請優先依照這個位置資訊處理附近查詢需求。",
+        f"位置名稱：{title}",
+    ]
+    if address:
+        lines.append(f"地址：{address}")
+    if latitude is not None and longitude is not None:
+        lines.append(f"座標：{latitude}, {longitude}")
+    lines.append("若任務涉及附近餐廳、景點、店家、診所、咖啡廳或在地推薦，請把這個位置當成主要查詢依據。")
+    return "\n".join(lines)
+
+
 def extract_sent_message_ids(api_response: Any) -> List[str]:
     sent_ids: List[str] = []
     if api_response is None:

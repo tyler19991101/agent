@@ -17,6 +17,8 @@
 9. 若是蒐集選項與比較，`task_type` 應該是 `research_and_compare`。
 10. 若是旅遊規劃、機票、飯店、行程、提醒等，`task_type` 應該是 `trip_planning`。
 11. 若是表單、準備事項、下一步操作指引，`task_type` 應該是 `action_prep`。
+12. 若使用者使用相對日期，例如今天、明天、後天、下週一，必須以執行上下文中的 `current_datetime_local` 與 `current_timezone` 為唯一基準，不可自行猜測。
+13. 若任務是建立行程或提醒，`calendar_action` / `task_action` 的日期時間必須與相對日期解析結果一致。
 
 你只能輸出以下 JSON schema：
 

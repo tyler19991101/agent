@@ -90,6 +90,8 @@ class DifyAgentClient:
             "6-4. 若任務是要系統代為操作網站到付款前，請用 browser_request 描述，不可假裝已經完成付款。\n\n"
             "7. 如果使用者要求輸出成 Word、PDF、TXT 或檔案，請在 requested_outputs 明確列出格式。\n"
             "8. document_title 要給出適合檔案命名的人類可讀標題。\n\n"
+            "9. 若使用者使用相對日期，例如今天、明天、後天、下週一，必須以目前執行上下文中的 current_datetime_local 與 current_timezone 為唯一基準，不可自行猜測其他日期。\n"
+            "10. 若使用者要求建立行程或提醒，calendar_action/task_action 中的日期時間必須與 relative date 解析結果一致。\n\n"
             f"使用者最新目標：{user_goal}\n"
             f"目前執行上下文：\n{context_json}"
         )

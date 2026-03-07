@@ -215,6 +215,10 @@ class SecretaryRuntime:
             )
             self.store.prune_short_context(run.memory_key, self.settings.short_context_ttl_days)
             context = self.store.build_runtime_context(run.id, run.memory_key)
+            current_local = datetime.now().astimezone()
+            context["current_datetime_local"] = current_local.isoformat()
+            context["current_date_local"] = current_local.date().isoformat()
+            context["current_timezone"] = str(current_local.tzinfo or "UTC")
             planning_goal = self._build_planning_goal(run.user_goal, context)
             self.store.add_step(
                 run.id,

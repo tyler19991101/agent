@@ -1,7 +1,8 @@
 #!/bin/bash
 
-BOT_PATH="/Users/linxuanli/Library/Mobile Documents/com~apple~CloudDocs/Code/bot.py"
-ENV_FILE="/Users/linxuanli/Library/Mobile Documents/com~apple~CloudDocs/Code/.env.bot"
+PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
+BOT_PATH="$PROJECT_DIR/bot.py"
+ENV_FILE="$PROJECT_DIR/.env.bot"
 MY_DOMAIN="acaulescent-daxton-semiarid.ngrok-free.dev"
 
 if [ ! -f "$ENV_FILE" ]; then

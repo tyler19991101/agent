@@ -4,3 +4,4 @@ __pycache__/
 .env.bot
 bot_memory.sqlite3
 lineagent/output/
+lineagent/logs/

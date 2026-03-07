@@ -3,6 +3,9 @@
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BOT_PATH="$PROJECT_DIR/bot.py"
 ENV_FILE="$PROJECT_DIR/.env.bot"
+LOG_DIR="$PROJECT_DIR/logs"
+BOT_LOG_PATH="$LOG_DIR/bot.log"
+NGROK_LOG_PATH="$LOG_DIR/ngrok.log"
 MY_DOMAIN="acaulescent-daxton-semiarid.ngrok-free.dev"
 
 if [ ! -f "$ENV_FILE" ]; then
@@ -11,8 +14,11 @@ if [ ! -f "$ENV_FILE" ]; then
   exit 1
 fi
 
-osascript -e "tell application \"Terminal\" to do script \"export PUBLIC_BASE_URL='https://$MY_DOMAIN'; set -a; source '$ENV_FILE'; set +a; python3 '$BOT_PATH'\""
-osascript -e "tell application \"Terminal\" to do script \"ngrok http --url=$MY_DOMAIN 8080\""
+mkdir -p "$LOG_DIR"
+
+osascript -e "tell application \"Terminal\" to do script \"export PUBLIC_BASE_URL='https://$MY_DOMAIN'; export BOT_LOG_PATH='$BOT_LOG_PATH'; set -a; source '$ENV_FILE'; set +a; python3 '$BOT_PATH'\""
+osascript -e "tell application \"Terminal\" to do script \"ngrok http --url=$MY_DOMAIN 8080 >> '$NGROK_LOG_PATH' 2>&1\""
 
 echo "已嘗試啟動 LINE 秘書代理與 ngrok。"
-echo "請確認 bot 視窗內環境變數與執行狀態是否正常。"
+echo "Bot log: $BOT_LOG_PATH"
+echo "ngrok log: $NGROK_LOG_PATH"

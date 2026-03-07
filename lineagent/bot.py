@@ -26,9 +26,19 @@ from secretary_agent.transport_line import (
     normalize_line_message,
 )
 
+PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+LOG_DIR = os.path.join(PROJECT_DIR, "logs")
+LOG_PATH = os.getenv("BOT_LOG_PATH", os.path.join(LOG_DIR, "bot.log"))
+os.makedirs(LOG_DIR, exist_ok=True)
+
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler(LOG_PATH, encoding="utf-8"),
+    ],
+    force=True,
 )
 logger = logging.getLogger("lineagent.bot")
 USER_SAFE_SYSTEM_ERROR_TEXT = "系統有錯誤，已通知 IT 處理，請稍後再試。"

@@ -2,8 +2,9 @@ import os
 import tempfile
 import unittest
 
+from secretary_agent.audio_transcriber import format_diarized_transcript, format_timestamp
 from secretary_agent.memory import SQLiteStore
-from secretary_agent.models import InboundMessage, PlannerResult
+from secretary_agent.models import InboundMessage, PlannerResult, SpeakerUtterance
 from secretary_agent.runtime import SecretaryRuntime
 from secretary_agent.transport_line import extract_sent_message_ids, format_location_message
 from secretary_agent.utils import split_text
@@ -248,6 +249,20 @@ class SecretaryRuntimeTest(unittest.TestCase):
 
     def test_extract_sent_message_ids_handles_missing_response(self):
         self.assertEqual(extract_sent_message_ids(None), [])
+
+    def test_format_diarized_transcript_adds_speaker_labels(self):
+        transcript = format_diarized_transcript(
+            [
+                SpeakerUtterance(speaker="0", text="這次的開發時程大概要多久？", start_ms=1000, end_ms=4000),
+                SpeakerUtterance(speaker="1", text="韌體那邊大概需要兩週。", start_ms=5000, end_ms=8000),
+                SpeakerUtterance(speaker="0", text="好，那就定在下個月初。", start_ms=9000, end_ms=11000),
+            ]
+        )
+        self.assertIn("Speaker A [00:01-00:04]: 這次的開發時程大概要多久？", transcript)
+        self.assertIn("Speaker B [00:05-00:08]: 韌體那邊大概需要兩週。", transcript)
+
+    def test_format_timestamp_supports_hours(self):
+        self.assertEqual(format_timestamp(3723000), "01:02:03")
 
     def test_format_location_message_contains_address_and_coordinates(self):
         class FakeLocation:

@@ -33,6 +33,7 @@ v1 先做最小可用版本，節點只要：
 - 搜尋網頁
 - 閱讀網頁內容
 - 讀 YouTube 字幕
+- 接收外部已完成 diarization 的逐字稿文字
 
 所以請在 Dify workspace 的 Tools / Plugins 裡啟用你環境可用的等價工具：
 - Google Search 或其他 search tool
@@ -40,6 +41,21 @@ v1 先做最小可用版本，節點只要：
 - YouTube Transcript 類工具
 
 注意：工具名稱會隨插件版本和部署方式不同而不同，但能力面要對齊上面三類。
+
+## 語音訊息策略
+
+這個專案已不再依賴 Dify 的 `audio-to-text`。
+
+LINE 語音現在建議走：
+
+`LINE 音訊 -> 外部 STT + Speaker Diarization -> 帶 Speaker 標籤的逐字稿 -> Dify`
+
+目前程式端已接成 `AssemblyAI` 管線，只要在本地 `.env.bot` 補上：
+
+- `STT_PROVIDER=assemblyai`
+- `ASSEMBLYAI_API_KEY=...`
+
+就會在收到 LINE 語音訊息時，自動做語者分離後再把逐字稿交給 Dify。
 
 ## 4. 在 LLM 節點貼上 prompt
 

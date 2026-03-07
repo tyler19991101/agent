@@ -53,3 +53,11 @@ class TaskRun:
     requires_approval: bool
     current_phase: str
     error: Optional[str] = None
+
+
+@dataclass
+class SpeakerUtterance:
+    speaker: str
+    text: str
+    start_ms: int
+    end_ms: int

@@ -5,6 +5,7 @@ from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.webhooks import AudioMessageContent, LocationMessageContent, MessageEvent, TextMessageContent
 
+from secretary_agent.audio_transcriber import AssemblyAIAudioTranscriber, AudioTranscriptionError
 from secretary_agent.config import Settings
 from secretary_agent.memory import SQLiteStore
 from secretary_agent.runtime import SecretaryRuntime
@@ -15,6 +16,14 @@ settings = Settings.from_env()
 store = SQLiteStore(settings.database_path)
 messenger = LineMessenger(settings.line_channel_access_token, store)
 runtime = SecretaryRuntime(settings=settings, store=store, messenger=messenger)
+try:
+    audio_transcriber = (
+        AssemblyAIAudioTranscriber.from_settings(settings)
+        if settings.stt_provider == "assemblyai"
+        else None
+    )
+except AudioTranscriptionError:
+    audio_transcriber = None
 runtime.start()
 
 app = Flask(__name__)
@@ -42,15 +51,17 @@ def on_message(event: MessageEvent):
 
 @handler.add(MessageEvent, message=AudioMessageContent)
 def on_audio_message(event: MessageEvent):
+    if audio_transcriber is None:
+        messenger.reply_text(event.reply_token, "目前未啟用語音逐字稿服務，請改用文字輸入。")
+        return
     try:
         audio_bytes = messenger.get_message_content(event.message.id)
-        transcript = runtime.agent_client.audio_to_text(
-            memory_key=f"user:{getattr(event.source, 'user_id', None) or getattr(event.source, 'group_id', None) or getattr(event.source, 'room_id', None) or 'anonymous'}",
+        transcript = audio_transcriber.transcribe_to_prompt(
             audio_bytes=audio_bytes,
             filename=f"{event.message.id}.m4a",
             mime_type="audio/m4a",
         )
-    except Exception as err:
+    except AudioTranscriptionError as err:
         messenger.reply_text(event.reply_token, f"語音轉文字失敗：{err}")
         return
 

@@ -48,6 +48,8 @@
   ],
   "warnings": ["string"],
   "missing_info": ["string"],
+  "requested_outputs": ["txt | docx | pdf"],
+  "document_title": "string",
   "profile_updates": {
     "preferred_departure_airport": "string",
     "budget_band": "string",
@@ -86,6 +88,10 @@
   - 風險、限制、價格可能變動、資訊來源限制。
 - `missing_info`
   - 用較具體的人話補充缺什麼。
+- `requested_outputs`
+  - 若使用者要求輸出檔案，請列出要產生的格式，例如 `["docx","pdf"]`。
+- `document_title`
+  - 若要輸出檔案，請提供適合檔名與文件標題的名稱。
 - `profile_updates`
   - 只保留可長期記住的穩定偏好。
 

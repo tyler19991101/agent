@@ -1,5 +1,6 @@
 import json
 import re
+import unicodedata
 from typing import Any, Dict, List
 
 
@@ -37,3 +38,24 @@ def normalize_bool(value: Any) -> bool:
 def looks_like_short_followup(text: str) -> bool:
     stripped = text.strip()
     return len(stripped) <= 120 and "\n" not in stripped
+
+
+def infer_requested_outputs(text: str) -> List[str]:
+    lowered = text.lower()
+    outputs: List[str] = []
+    mapping = (
+        ("docx", ("word", "docx", "文件檔", "word檔")),
+        ("pdf", ("pdf",)),
+        ("txt", ("txt", "文字檔", "純文字")),
+    )
+    for fmt, keywords in mapping:
+        if any(keyword in lowered for keyword in keywords):
+            outputs.append(fmt)
+    return outputs
+
+
+def sanitize_filename(value: str, default: str = "artifact") -> str:
+    normalized = unicodedata.normalize("NFKD", value).strip()
+    ascii_safe = "".join(ch if ch.isalnum() or ch in {"-", "_", " "} else "_" for ch in normalized)
+    ascii_safe = re.sub(r"\s+", "_", ascii_safe).strip("._")
+    return ascii_safe[:80] or default

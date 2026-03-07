@@ -3,6 +3,7 @@ from threading import Event, Thread
 from typing import Any, Dict, List, Optional
 
 from secretary_agent.config import Settings
+from secretary_agent.artifact_generator import ArtifactGenerator
 from secretary_agent.dify_client import DifyAgentClient
 from secretary_agent.memory import SQLiteStore
 from secretary_agent.models import InboundMessage, PlannerResult, TaskRun
@@ -10,6 +11,7 @@ from secretary_agent.utils import (
     APPROVAL_KEYWORDS,
     REJECTION_KEYWORDS,
     RESET_COMMANDS,
+    infer_requested_outputs,
     looks_like_short_followup,
 )
 
@@ -32,6 +34,10 @@ class SecretaryRuntime:
             api_key=settings.dify_api_key,
             base_url=settings.dify_base_url,
             user_prefix=settings.dify_user_prefix,
+        )
+        self.artifact_generator = ArtifactGenerator(
+            output_dir=settings.artifact_output_dir,
+            public_base_url=settings.public_base_url,
         )
         self.stop_event = Event()
         self.worker: Optional[Thread] = None
@@ -143,6 +149,8 @@ class SecretaryRuntime:
             if plan.profile_updates:
                 self.store.update_profile(run.memory_key, plan.profile_updates)
 
+            plan.requested_outputs = self._merge_requested_outputs(run.user_goal, plan.requested_outputs)
+
             normalized_goal = plan.goal_summary or run.user_goal
             if plan.requires_approval or plan.needed_inputs or plan.missing_info:
                 prompt = self._build_approval_prompt(plan)
@@ -170,6 +178,9 @@ class SecretaryRuntime:
                 return
 
             final_text = self._build_final_text(plan)
+            generated_artifacts = self._generate_requested_artifacts(run.id, run.user_goal, plan, final_text)
+            if generated_artifacts:
+                final_text = self._append_artifact_links(final_text, generated_artifacts)
             self.store.add_artifact(run.id, kind="final_report", content=final_text)
             self.store.update_run_status(
                 run.id,
@@ -240,6 +251,63 @@ class SecretaryRuntime:
             if not url:
                 continue
             lines.append(f"- {label}: {url}")
+        return "\n".join(lines)
+
+    def _merge_requested_outputs(self, user_goal: str, requested_outputs: List[str]) -> List[str]:
+        merged: List[str] = []
+        for fmt in list(requested_outputs) + infer_requested_outputs(user_goal):
+            if fmt not in {"txt", "docx", "pdf"}:
+                continue
+            if fmt not in merged:
+                merged.append(fmt)
+        return merged
+
+    def _generate_requested_artifacts(
+        self,
+        run_id: int,
+        user_goal: str,
+        plan: PlannerResult,
+        final_text: str,
+    ) -> List[Dict[str, str]]:
+        if not plan.requested_outputs:
+            return []
+        title = plan.document_title or plan.goal_summary or user_goal[:40] or "report"
+        generated = self.artifact_generator.generate(
+            title=title,
+            content=final_text,
+            output_formats=plan.requested_outputs,
+        )
+        artifacts: List[Dict[str, str]] = []
+        for item in generated:
+            self.store.add_artifact(
+                run_id,
+                kind="generated_file",
+                ref_key=item.token,
+                content=item.filename,
+                metadata={
+                    "format": item.format,
+                    "path": item.path,
+                    "filename": item.filename,
+                    "url": item.url,
+                },
+            )
+            artifacts.append(
+                {
+                    "format": item.format,
+                    "filename": item.filename,
+                    "url": item.url,
+                    "path": item.path,
+                }
+            )
+        return artifacts
+
+    def _append_artifact_links(self, text: str, artifacts: List[Dict[str, str]]) -> str:
+        lines = [text.strip()] if text.strip() else []
+        lines.append("輸出檔案：")
+        for item in artifacts:
+            label = f"{item['format'].upper()} - {item['filename']}"
+            target = item["url"] or item["path"]
+            lines.append(f"- {label}: {target}")
         return "\n".join(lines)
 
     def _should_resume_pending(self, pending: Any, inbound: InboundMessage, quoted_text: str) -> bool:
@@ -315,4 +383,6 @@ class SecretaryRuntime:
             "warnings": plan.warnings,
             "missing_info": plan.missing_info,
             "profile_updates": plan.profile_updates,
+            "requested_outputs": plan.requested_outputs,
+            "document_title": plan.document_title,
         }

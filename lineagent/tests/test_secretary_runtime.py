@@ -11,7 +11,7 @@ from secretary_agent.transport_line import (
     format_location_message,
     infer_media_metadata,
 )
-from secretary_agent.utils import split_text
+from secretary_agent.utils import infer_requested_outputs, split_text
 
 
 class FakeSettings:
@@ -20,6 +20,8 @@ class FakeSettings:
     dify_user_prefix = "line"
     worker_poll_seconds = 0.01
     short_context_ttl_days = 14
+    public_base_url = "https://example.com"
+    artifact_output_dir = ""
 
 
 class FakeMessenger:
@@ -78,6 +80,7 @@ class SecretaryRuntimeTest(unittest.TestCase):
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
         self.db_path = os.path.join(self.tempdir.name, "bot_memory.sqlite3")
+        FakeSettings.artifact_output_dir = os.path.join(self.tempdir.name, "output", "doc")
         self.store = SQLiteStore(self.db_path)
         self.messenger = FakeMessenger()
 
@@ -138,6 +141,31 @@ class SecretaryRuntimeTest(unittest.TestCase):
         self.assertIn("這是摘要", self.messenger.pushes[0][1])
         self.assertIn("相關連結：", self.messenger.pushes[0][1])
         self.assertIn("https://www.skyscanner.com.tw", self.messenger.pushes[0][1])
+
+    def test_runtime_generates_requested_output_files(self):
+        runtime = SecretaryRuntime(
+            settings=FakeSettings(),
+            store=self.store,
+            messenger=self.messenger,
+            agent_client=FakeAgentClient(
+                [
+                    PlannerResult(
+                        task_type="information_request",
+                        final_reply="這是整理好的會議摘要",
+                        requested_outputs=["txt", "docx"],
+                        document_title="會議摘要",
+                    )
+                ]
+            ),
+        )
+        runtime.handle_inbound_message(self.inbound("幫我整理會議並輸出成 word 和 txt"))
+        runtime.process_next_run()
+        pushed = self.messenger.pushes[0][1]
+        self.assertIn("輸出檔案：", pushed)
+        self.assertIn("DOCX", pushed)
+        self.assertIn("TXT", pushed)
+        artifacts = self.store.get_artifacts(1, kind="generated_file")
+        self.assertEqual(len(artifacts), 2)
 
     def test_reset_clears_history_and_profile(self):
         self.store.append_history("user:U123", "user", "hello")
@@ -297,6 +325,10 @@ class SecretaryRuntimeTest(unittest.TestCase):
         filename, mime_type = infer_media_metadata(message)
         self.assertEqual(filename, "meeting.mp3")
         self.assertEqual(mime_type, "audio/mpeg")
+
+    def test_infer_requested_outputs_from_user_text(self):
+        outputs = infer_requested_outputs("幫我整理內容，輸出成 Word、PDF 和 txt")
+        self.assertEqual(outputs, ["docx", "pdf", "txt"])
 
     def test_format_location_message_contains_address_and_coordinates(self):
         class FakeLocation:

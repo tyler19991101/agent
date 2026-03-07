@@ -57,6 +57,17 @@ LINE 語音現在建議走：
 
 就會在收到 LINE 語音訊息時，自動做語者分離後再把逐字稿交給 Dify。
 
+## 檔案輸出策略
+
+若使用者要求輸出成 `Word / PDF / TXT`：
+
+- Dify 只負責回傳：
+  - `requested_outputs`
+  - `document_title`
+  - `final_reply`
+- 本地 Python backend 負責真正生成檔案
+- LINE 回傳的是下載連結，不是直接附加 docx/pdf 檔
+
 ## 4. 在 LLM 節點貼上 prompt
 
 把 [`SYSTEM_PROMPT.md`](./SYSTEM_PROMPT.md) 的內容貼進 LLM 節點的 system prompt。

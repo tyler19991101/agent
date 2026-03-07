@@ -68,7 +68,9 @@ class DifyAgentClient:
             '  "action_links": [{"label":"string","url":"string"}],\n'
             '  "warnings": ["string"],\n'
             '  "missing_info": ["string"],\n'
-            '  "profile_updates": {"key":"value"}\n'
+            '  "profile_updates": {"key":"value"},\n'
+            '  "requested_outputs": ["txt | docx | pdf"],\n'
+            '  "document_title": "string"\n'
             "}\n"
             "規則：\n"
             "1. 一律使用繁體中文。\n"
@@ -77,6 +79,8 @@ class DifyAgentClient:
             "4. 如果需要使用者做選擇或確認，requires_approval=true。\n"
             "5. action_links 只能放官方或可信賴站點的下一步連結。\n"
             "6. profile_updates 只填可穩定記住的偏好。\n\n"
+            "7. 如果使用者要求輸出成 Word、PDF、TXT 或檔案，請在 requested_outputs 明確列出格式。\n"
+            "8. document_title 要給出適合檔案命名的人類可讀標題。\n\n"
             f"使用者最新目標：{user_goal}\n"
             f"目前執行上下文：\n{context_json}"
         )
@@ -135,6 +139,8 @@ class DifyAgentClient:
             warnings=list(payload.get("warnings", []) or []),
             missing_info=list(payload.get("missing_info", []) or []),
             profile_updates=dict(payload.get("profile_updates", {}) or {}),
+            requested_outputs=list(payload.get("requested_outputs", []) or []),
+            document_title=str(payload.get("document_title", "")),
             raw_answer=answer,
         )
 

@@ -447,6 +447,14 @@ class SQLiteStore:
             with self.connect() as conn:
                 return conn.execute(query, tuple(params)).fetchall()
 
+    def get_artifact_by_ref_key(self, ref_key: str) -> Optional[sqlite3.Row]:
+        with self.lock:
+            with self.connect() as conn:
+                return conn.execute(
+                    "SELECT * FROM artifacts WHERE ref_key = ? ORDER BY id DESC LIMIT 1",
+                    (ref_key,),
+                ).fetchone()
+
     def create_pending_approval(
         self,
         *,

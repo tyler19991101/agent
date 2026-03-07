@@ -40,6 +40,8 @@ class PlannerResult:
     warnings: List[str] = field(default_factory=list)
     missing_info: List[str] = field(default_factory=list)
     profile_updates: Dict[str, Any] = field(default_factory=dict)
+    requested_outputs: List[str] = field(default_factory=list)
+    document_title: str = ""
     raw_answer: str = ""
 
 

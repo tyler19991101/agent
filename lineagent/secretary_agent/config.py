@@ -18,6 +18,8 @@ class Settings:
     stt_timeout_seconds: float
     stt_upload_timeout_seconds: float
     diarization_speakers_expected: int
+    public_base_url: str
+    artifact_output_dir: str
     database_path: str
     worker_poll_seconds: float
     short_context_ttl_days: int
@@ -43,6 +45,11 @@ class Settings:
             stt_timeout_seconds=float(os.getenv("STT_TIMEOUT_SECONDS", "120")),
             stt_upload_timeout_seconds=float(os.getenv("STT_UPLOAD_TIMEOUT_SECONDS", "600")),
             diarization_speakers_expected=int(os.getenv("DIARIZATION_SPEAKERS_EXPECTED", "0")),
+            public_base_url=os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/"),
+            artifact_output_dir=os.getenv(
+                "ARTIFACT_OUTPUT_DIR",
+                os.path.join(base_dir, "output", "doc"),
+            ).strip(),
             database_path=os.getenv(
                 "BOT_DB_PATH",
                 os.path.join(base_dir, "bot_memory.sqlite3"),

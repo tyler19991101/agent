@@ -2,7 +2,7 @@ import logging
 import os
 import threading
 
-from flask import Flask, abort, request
+from flask import Flask, abort, request, send_file
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.webhooks import (
@@ -62,6 +62,21 @@ def callback():
         logger.exception("Unhandled exception while processing LINE callback")
         abort(500)
     return "OK"
+
+
+@app.route("/downloads/<token>", methods=["GET"])
+def download_artifact(token: str):
+    row = store.get_artifact_by_ref_key(token)
+    if not row:
+        abort(404)
+    import json
+
+    metadata = json.loads(row["metadata_json"] or "{}")
+    path = metadata.get("path", "")
+    filename = metadata.get("filename") or row["content"]
+    if not path or not os.path.isfile(path):
+        abort(404)
+    return send_file(path, as_attachment=True, download_name=filename)
 
 
 @handler.add(MessageEvent, message=TextMessageContent)

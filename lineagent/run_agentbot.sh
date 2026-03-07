@@ -11,7 +11,7 @@ if [ ! -f "$ENV_FILE" ]; then
   exit 1
 fi
 
-osascript -e "tell application \"Terminal\" to do script \"set -a; source '$ENV_FILE'; set +a; python3 '$BOT_PATH'\""
+osascript -e "tell application \"Terminal\" to do script \"export PUBLIC_BASE_URL='https://$MY_DOMAIN'; set -a; source '$ENV_FILE'; set +a; python3 '$BOT_PATH'\""
 osascript -e "tell application \"Terminal\" to do script \"ngrok http --url=$MY_DOMAIN 8080\""
 
 echo "已嘗試啟動 LINE 秘書代理與 ngrok。"

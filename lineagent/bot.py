@@ -3,7 +3,7 @@ import os
 from flask import Flask, abort, request
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
-from linebot.v3.webhooks import MessageEvent, TextMessageContent
+from linebot.v3.webhooks import AudioMessageContent, MessageEvent, TextMessageContent
 
 from secretary_agent.config import Settings
 from secretary_agent.memory import SQLiteStore
@@ -37,6 +37,28 @@ def callback():
 @handler.add(MessageEvent, message=TextMessageContent)
 def on_message(event: MessageEvent):
     inbound = normalize_line_message(event)
+    runtime.handle_inbound_message(inbound)
+
+
+@handler.add(MessageEvent, message=AudioMessageContent)
+def on_audio_message(event: MessageEvent):
+    try:
+        audio_bytes = messenger.get_message_content(event.message.id)
+        transcript = runtime.agent_client.audio_to_text(
+            memory_key=f"user:{getattr(event.source, 'user_id', None) or getattr(event.source, 'group_id', None) or getattr(event.source, 'room_id', None) or 'anonymous'}",
+            audio_bytes=audio_bytes,
+            filename=f"{event.message.id}.m4a",
+            mime_type="audio/m4a",
+        )
+    except Exception as err:
+        messenger.reply_text(event.reply_token, f"語音轉文字失敗：{err}")
+        return
+
+    if not transcript:
+        messenger.reply_text(event.reply_token, "語音轉文字失敗，請再試一次或改用文字輸入。")
+        return
+
+    inbound = normalize_line_message(event, text_override=transcript)
     runtime.handle_inbound_message(inbound)
 
 

@@ -122,16 +122,17 @@ class SecretaryRuntime:
     def _process_run(self, run: TaskRun) -> None:
         try:
             context = self.store.build_runtime_context(run.id, run.memory_key)
+            planning_goal = self._build_planning_goal(run.user_goal, context)
             self.store.add_step(
                 run.id,
                 step_type="plan",
                 actor="coordinator_agent",
                 status="started",
-                input_payload={"goal": run.user_goal, "context": context},
+                input_payload={"goal": planning_goal, "context": context},
             )
             plan = self.agent_client.plan(
                 memory_key=run.memory_key,
-                user_goal=run.user_goal,
+                user_goal=planning_goal,
                 runtime_context=context,
             )
             self.store.add_step(
@@ -170,7 +171,7 @@ class SecretaryRuntime:
                 self.store.append_history(run.memory_key, "assistant", prompt)
                 return
 
-            final_text = plan.final_reply or plan.draft_user_reply or "任務已完成，但沒有取得可顯示的結果。"
+            final_text = self._build_final_text(plan)
             self.store.add_artifact(run.id, kind="final_report", content=final_text)
             self.store.update_run_status(
                 run.id,
@@ -204,6 +205,45 @@ class SecretaryRuntime:
             push_target = self._memory_key_to_push_target(run.memory_key)
             self.messenger.push_text(push_target, error_text)
             self.store.append_history(run.memory_key, "assistant", error_text)
+
+    def _build_planning_goal(self, user_goal: str, context: Dict[str, Any]) -> str:
+        artifacts = context.get("artifacts", [])
+        approval_responses = [
+            str(item.get("content", "")).strip()
+            for item in artifacts
+            if item.get("kind") == "approval_response" and str(item.get("content", "")).strip()
+        ]
+        if not approval_responses:
+            return user_goal
+
+        lines = [
+            f"原始任務：{user_goal}",
+            "使用者針對前一次追問補充的資訊如下，請把這些內容視為同一個任務的更新條件，而不是新的獨立任務：",
+        ]
+        for idx, response in enumerate(approval_responses, start=1):
+            lines.append(f"{idx}. {response}")
+        lines.append("請整合原始任務與補充資訊後，再決定是否仍需追問。")
+        return "\n".join(lines)
+
+    def _build_final_text(self, plan: PlannerResult) -> str:
+        base_text = plan.final_reply or plan.draft_user_reply or "任務已完成，但沒有取得可顯示的結果。"
+        if not plan.action_links:
+            return base_text
+
+        existing_text = base_text.strip()
+        existing_urls = {str(item.get("url", "")).strip() for item in plan.action_links if item.get("url")}
+        if existing_text and any(url and url in existing_text for url in existing_urls):
+            return base_text
+
+        lines = [existing_text] if existing_text else []
+        lines.append("相關連結：")
+        for item in plan.action_links:
+            label = str(item.get("label", "")).strip() or "連結"
+            url = str(item.get("url", "")).strip()
+            if not url:
+                continue
+            lines.append(f"- {label}: {url}")
+        return "\n".join(lines)
 
     def _should_resume_pending(self, pending: Any, inbound: InboundMessage, quoted_text: str) -> bool:
         prompt_message_id = pending["prompt_message_id"]

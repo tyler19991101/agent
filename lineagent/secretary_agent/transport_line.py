@@ -5,6 +5,7 @@ from linebot.v3.messaging import (
     ApiClient,
     Configuration,
     MessagingApi,
+    MessagingApiBlob,
     PushMessageRequest,
     ReplyMessageRequest,
     TextMessage,
@@ -36,7 +37,7 @@ def get_line_event_id(event: Any) -> Optional[str]:
     return getattr(event, "webhookEventId", None)
 
 
-def normalize_line_message(event: Any) -> InboundMessage:
+def normalize_line_message(event: Any, text_override: Optional[str] = None) -> InboundMessage:
     source_id = get_push_target_id(event.source) or "anonymous"
     user_id = getattr(event.source, "user_id", None)
     source_type = getattr(event.source, "type", "unknown")
@@ -45,7 +46,7 @@ def normalize_line_message(event: Any) -> InboundMessage:
         source_id=source_id,
         user_id=user_id,
         reply_token=event.reply_token,
-        text=(event.message.text or "").strip(),
+        text=(text_override if text_override is not None else (event.message.text or "")).strip(),
         quoted_message_id=get_quoted_message_id(event.message),
         received_at=datetime.now(timezone.utc),
         line_event_id=get_line_event_id(event),
@@ -94,3 +95,13 @@ class LineMessenger:
                 )
                 sent_ids.extend(extract_sent_message_ids(response))
         return sent_ids
+
+    def get_message_content(self, message_id: str) -> bytes:
+        with ApiClient(self.configuration) as api_client:
+            api = MessagingApiBlob(api_client)
+            response = api.get_message_content(message_id)
+            if hasattr(response, "read"):
+                return response.read()
+            if isinstance(response, bytes):
+                return response
+            return bytes(response)

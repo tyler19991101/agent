@@ -45,8 +45,16 @@ class FakeMessenger:
 class FakeAgentClient:
     def __init__(self, results):
         self.results = list(results)
+        self.calls = []
 
     def plan(self, *, memory_key, user_goal, runtime_context):
+        self.calls.append(
+            {
+                "memory_key": memory_key,
+                "user_goal": user_goal,
+                "runtime_context": runtime_context,
+            }
+        )
         if not self.results:
             raise AssertionError("No fake planner result available")
         return self.results.pop(0)
@@ -93,6 +101,29 @@ class SecretaryRuntimeTest(unittest.TestCase):
         self.assertEqual(len(self.messenger.pushes), 1)
         self.assertIn("這是結果", self.messenger.pushes[0][1])
 
+    def test_final_reply_appends_action_links_when_missing_from_text(self):
+        runtime = SecretaryRuntime(
+            settings=FakeSettings(),
+            store=self.store,
+            messenger=self.messenger,
+            agent_client=FakeAgentClient(
+                [
+                    PlannerResult(
+                        task_type="information_request",
+                        final_reply="這是摘要",
+                        action_links=[
+                            {"label": "Skyscanner", "url": "https://www.skyscanner.com.tw"},
+                        ],
+                    )
+                ]
+            ),
+        )
+        runtime.handle_inbound_message(self.inbound("幫我查機票"))
+        runtime.process_next_run()
+        self.assertIn("這是摘要", self.messenger.pushes[0][1])
+        self.assertIn("相關連結：", self.messenger.pushes[0][1])
+        self.assertIn("https://www.skyscanner.com.tw", self.messenger.pushes[0][1])
+
     def test_reset_clears_history_and_profile(self):
         self.store.append_history("user:U123", "user", "hello")
         self.store.update_profile("user:U123", {"budget": "mid"})
@@ -107,25 +138,26 @@ class SecretaryRuntimeTest(unittest.TestCase):
         self.assertEqual(self.store.get_profile("user:U123"), {})
 
     def test_approval_flow_resumes_existing_run(self):
+        agent_client = FakeAgentClient(
+            [
+                PlannerResult(
+                    task_type="trip_planning",
+                    requires_approval=True,
+                    approval_type="missing_info",
+                    approval_prompt="請告訴我出發日期與預算。",
+                    draft_user_reply="我先幫你規劃泰國旅行。",
+                ),
+                PlannerResult(
+                    task_type="trip_planning",
+                    final_reply="以下是泰國旅遊方案與付款連結。",
+                ),
+            ]
+        )
         runtime = SecretaryRuntime(
             settings=FakeSettings(),
             store=self.store,
             messenger=self.messenger,
-            agent_client=FakeAgentClient(
-                [
-                    PlannerResult(
-                        task_type="trip_planning",
-                        requires_approval=True,
-                        approval_type="missing_info",
-                        approval_prompt="請告訴我出發日期與預算。",
-                        draft_user_reply="我先幫你規劃泰國旅行。",
-                    ),
-                    PlannerResult(
-                        task_type="trip_planning",
-                        final_reply="以下是泰國旅遊方案與付款連結。",
-                    ),
-                ]
-            ),
+            agent_client=agent_client,
         )
         runtime.handle_inbound_message(self.inbound("我要到泰國旅遊", line_event_id="evt-a"))
         runtime.process_next_run()
@@ -139,6 +171,9 @@ class SecretaryRuntimeTest(unittest.TestCase):
         runtime.process_next_run()
         self.assertEqual(len(self.messenger.pushes), 2)
         self.assertIn("泰國旅遊方案", self.messenger.pushes[-1][1])
+        self.assertEqual(len(agent_client.calls), 2)
+        self.assertIn("原始任務：我要到泰國旅遊", agent_client.calls[-1]["user_goal"])
+        self.assertIn("3/20 出發，預算 4 萬", agent_client.calls[-1]["user_goal"])
 
     def test_split_text_chunks_long_messages(self):
         text = "a" * 9000

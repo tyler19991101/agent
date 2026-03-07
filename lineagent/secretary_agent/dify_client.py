@@ -1,4 +1,5 @@
 import json
+import uuid
 from typing import Any, Dict, Optional
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -17,6 +18,34 @@ class DifyAgentClient:
         prompt = self._build_prompt(user_goal=user_goal, runtime_context=runtime_context)
         answer = self._chat(query=prompt, user=f"{self.user_prefix}:{memory_key}")
         return self._parse_answer(answer)
+
+    def audio_to_text(self, *, memory_key: str, audio_bytes: bytes, filename: str, mime_type: str) -> str:
+        user = f"{self.user_prefix}:{memory_key}"
+        payload, content_type = self._build_multipart_form_data(
+            fields={"user": user},
+            files={"file": (filename, audio_bytes, mime_type)},
+        )
+        req = Request(
+            f"{self.base_url}/audio-to-text",
+            data=payload,
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": content_type,
+                "Accept": "application/json",
+                "User-Agent": "curl/8.7.1",
+            },
+            method="POST",
+        )
+        try:
+            with urlopen(req, timeout=90) as resp:
+                body = json.loads(resp.read().decode("utf-8"))
+                text = str(body.get("text", "")).strip()
+                return text
+        except HTTPError as err:
+            detail = err.read().decode("utf-8", errors="ignore")
+            raise RuntimeError(f"Dify HTTP error {err.code}: {detail}") from err
+        except URLError as err:
+            raise RuntimeError(f"Dify connection error: {err}") from err
 
     def _build_prompt(self, *, user_goal: str, runtime_context: Dict[str, Any]) -> str:
         context_json = json.dumps(runtime_context, ensure_ascii=False, indent=2)
@@ -108,3 +137,34 @@ class DifyAgentClient:
             profile_updates=dict(payload.get("profile_updates", {}) or {}),
             raw_answer=answer,
         )
+
+    @staticmethod
+    def _build_multipart_form_data(
+        *,
+        fields: Dict[str, str],
+        files: Dict[str, tuple[str, bytes, str]],
+    ) -> tuple[bytes, str]:
+        boundary = f"----CodexBoundary{uuid.uuid4().hex}"
+        body = bytearray()
+
+        for name, value in fields.items():
+            body.extend(f"--{boundary}\r\n".encode("utf-8"))
+            body.extend(
+                f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode("utf-8")
+            )
+            body.extend(str(value).encode("utf-8"))
+            body.extend(b"\r\n")
+
+        for name, (filename, content, mime_type) in files.items():
+            body.extend(f"--{boundary}\r\n".encode("utf-8"))
+            body.extend(
+                (
+                    f'Content-Disposition: form-data; name="{name}"; filename="{filename}"\r\n'
+                    f"Content-Type: {mime_type}\r\n\r\n"
+                ).encode("utf-8")
+            )
+            body.extend(content)
+            body.extend(b"\r\n")
+
+        body.extend(f"--{boundary}--\r\n".encode("utf-8"))
+        return bytes(body), f"multipart/form-data; boundary={boundary}"

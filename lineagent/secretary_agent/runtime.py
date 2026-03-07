@@ -46,19 +46,12 @@ class SecretaryRuntime:
         self.store.prune_short_context(inbound.memory_key, self.settings.short_context_ttl_days)
         text = inbound.text.strip()
         if not text:
-            self._reply(inbound.reply_token, "請直接告訴我你要我協助的事情。", inbound.memory_key)
+            self._respond_immediate(inbound, "請直接告訴我你要我協助的事情。")
             return
 
         if text.lower() in RESET_COMMANDS or text in RESET_COMMANDS:
             self.store.clear_memory(inbound.memory_key)
-            message_ids = self.messenger.reply_text(
-                inbound.reply_token,
-                "已清除這個 LINE 身分的對話與偏好記憶。",
-            )
-            self.store.store_bot_messages(
-                message_ids,
-                self.messenger.split_for_storage("已清除這個 LINE 身分的對話與偏好記憶。"),
-            )
+            self._send_immediate_without_history(inbound, "已清除這個 LINE 身分的對話與偏好記憶。")
             return
 
         self.store.append_history(inbound.memory_key, "user", text)
@@ -79,7 +72,7 @@ class SecretaryRuntime:
                 status="queued",
                 current_phase="approval_resolved",
             )
-            self._reply(inbound.reply_token, "收到你的回覆，我繼續處理並整理結果。", inbound.memory_key)
+            self._respond_immediate(inbound, "收到你的回覆，我繼續處理並整理結果。")
             return
 
         run_id, created = self.store.create_task_run(
@@ -107,7 +100,8 @@ class SecretaryRuntime:
             ack = "任務已收到，我會先規劃並整理可執行方案，再把結果推送給你。"
         else:
             ack = "這則訊息我已收到過，正在處理中。"
-        self._reply(inbound.reply_token, ack, inbound.memory_key)
+        if inbound.reply_enabled:
+            self._reply(inbound.reply_token, ack, inbound.memory_key)
 
     def process_next_run(self) -> bool:
         run = self.store.claim_next_run()
@@ -283,6 +277,21 @@ class SecretaryRuntime:
         message_ids = self.messenger.reply_text(reply_token, text)
         self.store.store_bot_messages(message_ids, self.messenger.split_for_storage(text))
         self.store.append_history(memory_key, "assistant", text)
+
+    def _send_immediate_without_history(self, inbound: InboundMessage, text: str) -> None:
+        if inbound.reply_enabled and inbound.reply_token:
+            message_ids = self.messenger.reply_text(inbound.reply_token, text)
+        else:
+            message_ids = self.messenger.push_text(self._memory_key_to_push_target(inbound.memory_key), text)
+        self.store.store_bot_messages(message_ids, self.messenger.split_for_storage(text))
+
+    def _respond_immediate(self, inbound: InboundMessage, text: str) -> None:
+        if inbound.reply_enabled and inbound.reply_token:
+            self._reply(inbound.reply_token, text, inbound.memory_key)
+            return
+        message_ids = self.messenger.push_text(self._memory_key_to_push_target(inbound.memory_key), text)
+        self.store.store_bot_messages(message_ids, self.messenger.split_for_storage(text))
+        self.store.append_history(inbound.memory_key, "assistant", text)
 
     def _memory_key_to_push_target(self, memory_key: str) -> str:
         return memory_key.split(":", 1)[1]

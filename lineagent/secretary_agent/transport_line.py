@@ -1,5 +1,8 @@
+import mimetypes
+import os
+import time
 from datetime import datetime, timezone
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Tuple
 
 from linebot.v3.messaging import (
     ApiClient,
@@ -37,7 +40,12 @@ def get_line_event_id(event: Any) -> Optional[str]:
     return getattr(event, "webhookEventId", None)
 
 
-def normalize_line_message(event: Any, text_override: Optional[str] = None) -> InboundMessage:
+def normalize_line_message(
+    event: Any,
+    text_override: Optional[str] = None,
+    *,
+    reply_enabled: bool = True,
+) -> InboundMessage:
     source_id = get_push_target_id(event.source) or "anonymous"
     user_id = getattr(event.source, "user_id", None)
     source_type = getattr(event.source, "type", "unknown")
@@ -46,6 +54,7 @@ def normalize_line_message(event: Any, text_override: Optional[str] = None) -> I
         source_id=source_id,
         user_id=user_id,
         reply_token=event.reply_token,
+        reply_enabled=reply_enabled,
         text=(text_override if text_override is not None else (event.message.text or "")).strip(),
         quoted_message_id=get_quoted_message_id(event.message),
         received_at=datetime.now(timezone.utc),
@@ -71,6 +80,37 @@ def format_location_message(message: Any) -> str:
     return "\n".join(lines)
 
 
+def infer_media_metadata(message: Any) -> Tuple[str, str]:
+    original_name = (getattr(message, "file_name", None) or getattr(message, "fileName", None) or "").strip()
+    extension = os.path.splitext(original_name)[1].lower()
+
+    if getattr(message, "type", "") == "audio":
+        if extension == ".mp3":
+            return original_name or "audio.mp3", "audio/mpeg"
+        if extension in {".wav", ".wave"}:
+            return original_name or "audio.wav", "audio/wav"
+        if extension == ".ogg":
+            return original_name or "audio.ogg", "audio/ogg"
+        if extension == ".aac":
+            return original_name or "audio.aac", "audio/aac"
+        return original_name or "audio.m4a", "audio/m4a"
+
+    guessed = mimetypes.guess_type(original_name)[0] if original_name else None
+    if guessed and guessed.startswith("audio/"):
+        return original_name, guessed
+
+    if extension == ".mp3":
+        return original_name or "audio.mp3", "audio/mpeg"
+    if extension in {".m4a", ".mp4"}:
+        return original_name or "audio.m4a", "audio/m4a"
+    if extension in {".wav", ".wave"}:
+        return original_name or "audio.wav", "audio/wav"
+    if extension == ".ogg":
+        return original_name or "audio.ogg", "audio/ogg"
+
+    return original_name or "audio.bin", guessed or "application/octet-stream"
+
+
 def extract_sent_message_ids(api_response: Any) -> List[str]:
     sent_ids: List[str] = []
     if api_response is None:
@@ -85,6 +125,9 @@ def extract_sent_message_ids(api_response: Any) -> List[str]:
 
 
 class LineMessenger:
+    CONTENT_READY_TIMEOUT_SECONDS = 20.0
+    CONTENT_READY_POLL_SECONDS = 1.0
+
     def __init__(self, access_token: str, store: Any):
         self.configuration = Configuration(access_token=access_token)
         self.store = store
@@ -114,12 +157,45 @@ class LineMessenger:
                 sent_ids.extend(extract_sent_message_ids(response))
         return sent_ids
 
-    def get_message_content(self, message_id: str) -> bytes:
+    def get_message_content(self, message_id: str, message_type: str = "") -> bytes:
         with ApiClient(self.configuration) as api_client:
             api = MessagingApiBlob(api_client)
+            normalized_type = (message_type or "").lower()
+            if normalized_type in {"audio", "video"}:
+                self._wait_for_media_content_ready(api, message_id)
             response = api.get_message_content(message_id)
-            if hasattr(response, "read"):
-                return response.read()
-            if isinstance(response, bytes):
-                return response
-            return bytes(response)
+            if isinstance(response, (bytes, bytearray)):
+                data = bytes(response)
+                if data:
+                    return data
+
+            response_with_info = api.get_message_content_with_http_info(
+                message_id,
+                _preload_content=False,
+            )
+            raw = getattr(response_with_info, "raw_data", None)
+            if hasattr(raw, "read"):
+                data = raw.read()
+                if data:
+                    return data
+            if isinstance(raw, (bytes, bytearray)):
+                data = bytes(raw)
+                if data:
+                    return data
+        raise ValueError(f"LINE message content is empty for message_id={message_id}")
+
+    def _wait_for_media_content_ready(self, api: MessagingApiBlob, message_id: str) -> None:
+        deadline = time.time() + self.CONTENT_READY_TIMEOUT_SECONDS
+        last_status = ""
+        while time.time() < deadline:
+            status_resp = api.get_message_content_transcoding_by_message_id(message_id)
+            status = str(getattr(status_resp, "status", "")).lower()
+            last_status = status
+            if status in {"succeeded", "success"}:
+                return
+            if status in {"failed", "error"}:
+                raise ValueError(f"LINE media transcoding failed for message_id={message_id}")
+            time.sleep(self.CONTENT_READY_POLL_SECONDS)
+        raise ValueError(
+            f"LINE media content not ready for message_id={message_id} status={last_status or 'unknown'}"
+        )

@@ -6,7 +6,11 @@ from secretary_agent.audio_transcriber import format_diarized_transcript, format
 from secretary_agent.memory import SQLiteStore
 from secretary_agent.models import InboundMessage, PlannerResult, SpeakerUtterance
 from secretary_agent.runtime import SecretaryRuntime
-from secretary_agent.transport_line import extract_sent_message_ids, format_location_message
+from secretary_agent.transport_line import (
+    extract_sent_message_ids,
+    format_location_message,
+    infer_media_metadata,
+)
 from secretary_agent.utils import split_text
 
 
@@ -88,6 +92,7 @@ class SecretaryRuntimeTest(unittest.TestCase):
             source_id="U123",
             user_id="U123",
             reply_token="reply-token",
+            reply_enabled=True,
             text=text,
             quoted_message_id=quoted_message_id,
             received_at=datetime.now(timezone.utc),
@@ -250,6 +255,23 @@ class SecretaryRuntimeTest(unittest.TestCase):
     def test_extract_sent_message_ids_handles_missing_response(self):
         self.assertEqual(extract_sent_message_ids(None), [])
 
+    def test_background_inbound_does_not_send_ack_reply(self):
+        runtime = SecretaryRuntime(
+            settings=FakeSettings(),
+            store=self.store,
+            messenger=self.messenger,
+            agent_client=FakeAgentClient(
+                [PlannerResult(task_type="information_request", final_reply="整理完成")]
+            ),
+        )
+        inbound = self.inbound("語音轉文字內容")
+        inbound.reply_enabled = False
+        runtime.handle_inbound_message(inbound)
+        self.assertEqual(len(self.messenger.replies), 0)
+        runtime.process_next_run()
+        self.assertEqual(len(self.messenger.pushes), 1)
+        self.assertIn("整理完成", self.messenger.pushes[0][1])
+
     def test_format_diarized_transcript_adds_speaker_labels(self):
         transcript = format_diarized_transcript(
             [
@@ -263,6 +285,18 @@ class SecretaryRuntimeTest(unittest.TestCase):
 
     def test_format_timestamp_supports_hours(self):
         self.assertEqual(format_timestamp(3723000), "01:02:03")
+
+    def test_infer_media_metadata_for_audio_message_defaults_to_m4a(self):
+        message = type("Msg", (), {"type": "audio"})()
+        filename, mime_type = infer_media_metadata(message)
+        self.assertEqual(filename, "audio.m4a")
+        self.assertEqual(mime_type, "audio/m4a")
+
+    def test_infer_media_metadata_for_mp3_file_message(self):
+        message = type("Msg", (), {"type": "file", "file_name": "meeting.mp3"})()
+        filename, mime_type = infer_media_metadata(message)
+        self.assertEqual(filename, "meeting.mp3")
+        self.assertEqual(mime_type, "audio/mpeg")
 
     def test_format_location_message_contains_address_and_coordinates(self):
         class FakeLocation:

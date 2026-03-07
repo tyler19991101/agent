@@ -16,6 +16,7 @@ class Settings:
     stt_speech_models: Tuple[str, ...]
     stt_poll_seconds: float
     stt_timeout_seconds: float
+    stt_upload_timeout_seconds: float
     diarization_speakers_expected: int
     database_path: str
     worker_poll_seconds: float
@@ -40,6 +41,7 @@ class Settings:
             ),
             stt_poll_seconds=float(os.getenv("STT_POLL_SECONDS", "2.5")),
             stt_timeout_seconds=float(os.getenv("STT_TIMEOUT_SECONDS", "120")),
+            stt_upload_timeout_seconds=float(os.getenv("STT_UPLOAD_TIMEOUT_SECONDS", "600")),
             diarization_speakers_expected=int(os.getenv("DIARIZATION_SPEAKERS_EXPECTED", "0")),
             database_path=os.getenv(
                 "BOT_DB_PATH",

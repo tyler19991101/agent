@@ -1,4 +1,5 @@
 import json
+import subprocess
 import time
 from typing import Any, Dict, List, Optional
 from urllib.error import HTTPError, URLError
@@ -21,6 +22,7 @@ class AssemblyAIAudioTranscriber:
         speech_models: Optional[List[str]] = None,
         poll_seconds: float = 2.5,
         timeout_seconds: float = 120.0,
+        upload_timeout_seconds: float = 600.0,
         speakers_expected: int = 0,
     ):
         self.api_key = api_key
@@ -28,6 +30,7 @@ class AssemblyAIAudioTranscriber:
         self.speech_models = speech_models or ["universal-3-pro", "universal-2"]
         self.poll_seconds = poll_seconds
         self.timeout_seconds = timeout_seconds
+        self.upload_timeout_seconds = upload_timeout_seconds
         self.speakers_expected = speakers_expected
         self.base_url = "https://api.assemblyai.com/v2"
 
@@ -43,6 +46,7 @@ class AssemblyAIAudioTranscriber:
             speech_models=list(settings.stt_speech_models),
             poll_seconds=settings.stt_poll_seconds,
             timeout_seconds=settings.stt_timeout_seconds,
+            upload_timeout_seconds=settings.stt_upload_timeout_seconds,
             speakers_expected=settings.diarization_speakers_expected,
         )
 
@@ -61,18 +65,43 @@ class AssemblyAIAudioTranscriber:
         return format_diarized_transcript(utterances, fallback_text=str(result.get("text", "")).strip())
 
     def _upload_audio(self, audio_bytes: bytes) -> str:
-        req = Request(
-            f"{self.base_url}/upload",
-            data=audio_bytes,
-            headers={
-                "Authorization": self.api_key,
-                "Content-Type": "application/octet-stream",
-                "Accept": "application/json",
-                "User-Agent": "curl/8.7.1",
-            },
-            method="POST",
-        )
-        payload = self._json_request(req)
+        try:
+            result = subprocess.run(
+                [
+                    "curl",
+                    "-sS",
+                    "-X",
+                    "POST",
+                    f"{self.base_url}/upload",
+                    "-H",
+                    f"Authorization: {self.api_key}",
+                    "-H",
+                    "Content-Type: application/octet-stream",
+                    "-H",
+                    "Accept: application/json",
+                    "-H",
+                    "User-Agent: curl/8.7.1",
+                    "--data-binary",
+                    "@-",
+                ],
+                input=audio_bytes,
+                capture_output=True,
+                timeout=self.upload_timeout_seconds,
+                check=True,
+            )
+        except subprocess.TimeoutExpired as err:
+            raise AudioTranscriptionError("AssemblyAI upload timed out") from err
+        except subprocess.CalledProcessError as err:
+            detail = err.stderr.decode("utf-8", errors="ignore") or err.stdout.decode(
+                "utf-8", errors="ignore"
+            )
+            raise AudioTranscriptionError(f"AssemblyAI upload failed: {detail}") from err
+
+        try:
+            payload = json.loads(result.stdout.decode("utf-8"))
+        except json.JSONDecodeError as err:
+            raise AudioTranscriptionError("AssemblyAI upload returned invalid JSON") from err
+
         upload_url = str(payload.get("upload_url", "")).strip()
         if not upload_url:
             raise AudioTranscriptionError("AssemblyAI upload failed: missing upload_url")

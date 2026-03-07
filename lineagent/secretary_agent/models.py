@@ -9,6 +9,7 @@ class InboundMessage:
     source_id: str
     user_id: Optional[str]
     reply_token: str
+    reply_enabled: bool
     text: str
     quoted_message_id: Optional[str]
     received_at: datetime

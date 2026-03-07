@@ -362,7 +362,7 @@ class SecretaryRuntimeTest(unittest.TestCase):
         run = self.store.get_task_run(1)
         self.assertEqual(run.current_phase, "awaiting_google_auth")
 
-    def test_browser_request_creates_sensitive_checkpoint(self):
+    def test_browser_request_is_deferred_for_next_phase(self):
         browser = FakeBrowserAutomation(store=self.store)
         runtime = SecretaryRuntime(
             settings=FakeSettings(),
@@ -388,10 +388,8 @@ class SecretaryRuntimeTest(unittest.TestCase):
         self.store.update_profile("user:U123", {"contact_email": "user@example.com"})
         runtime.handle_inbound_message(self.inbound("幫我填到結帳前"))
         runtime.process_next_run()
-        self.assertEqual(len(browser.calls), 1)
-        checkpoint = self.store.get_sensitive_checkpoint("checkpoint-token")
-        self.assertIsNotNone(checkpoint)
-        self.assertIn("/automation/checkpoint-token", self.messenger.pushes[0][1])
+        self.assertEqual(len(browser.calls), 0)
+        self.assertIn("下一階段", self.messenger.pushes[0][1])
 
     def test_split_text_chunks_long_messages(self):
         text = "a" * 9000

@@ -807,38 +807,18 @@ class SecretaryRuntime:
     def _handle_browser_request(self, run: TaskRun, plan: PlannerResult) -> Dict[str, Any]:
         if not plan.browser_request:
             return {}
-        profile = self.store.get_profile(run.memory_key)
-        accounts = self._serialize_accounts(run.memory_key)
-        checkpoint = self.browser_automation.create_checkpoint(
-            run_id=run.id,
-            memory_key=run.memory_key,
-            browser_request=plan.browser_request,
-            profile=profile,
-            accounts=accounts,
+        self.logger.info(
+            format_log_event(
+                "browser_request_deferred",
+                run_id=run.id,
+                memory_key=run.memory_key,
+                domain=plan.browser_request.get("domain", ""),
+                intent=plan.browser_request.get("intent", ""),
+            )
         )
-        review_url = f"{self.settings.public_base_url}/automation/{checkpoint['checkpoint_token']}"
-        message = (
-            "我已整理好這次的自動操作需求，請先到確認頁檢查將使用的資料與步驟：\n"
-            f"{review_url}\n"
-            "確認後我會繼續往下一步。"
-        )
-        self.store.update_run_status(
-            run.id,
-            status="waiting_approval",
-            current_phase="awaiting_sensitive_confirmation",
-            requires_approval=True,
-        )
-        self.store.add_artifact(
-            run.id,
-            kind="browser_request",
-            content=json.dumps(plan.browser_request, ensure_ascii=False),
-            metadata={"review_url": review_url, "enabled": self.browser_automation.enabled},
-        )
-        push_target = self._memory_key_to_push_target(run.memory_key)
-        message_ids = self.messenger.push_text(push_target, message)
-        self.store.store_bot_messages(message_ids, self.messenger.split_for_storage(message))
-        self.store.append_history(run.memory_key, "assistant", message)
-        return {"status": "awaiting_sensitive_confirmation"}
+        return {
+            "final_reply": "網站自動操作到付款前的功能會放到下一階段，目前先提供個人記憶、行事曆與提醒事項服務。",
+        }
 
     def _serialize_accounts(self, memory_key: str) -> List[Dict[str, Any]]:
         results: List[Dict[str, Any]] = []

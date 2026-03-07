@@ -75,13 +75,6 @@
     "due": "ISO-8601",
     "task_id": "string"
   },
-  "browser_request": {
-    "domain": "string",
-    "intent": "string",
-    "target_items": ["string"],
-    "user_profile_fields_needed": ["string"],
-    "stop_before_payment": true
-  },
   "requested_outputs": ["txt | docx | pdf"],
   "document_title": "string",
   "profile_updates": {
@@ -136,8 +129,6 @@
   - 若要建立或查詢 Google Calendar 行程，請輸出結構化欄位，不要只寫在 final_reply。
 - `task_action`
   - 若要建立或查詢 Google Tasks 提醒，請輸出結構化欄位。
-- `browser_request`
-  - 若使用者要求你代為操作網站、填資料、加入購物車、帶到付款前，請用這個欄位描述，不可假裝已完成付款。
 
 輸出準則：
 
@@ -155,4 +146,4 @@
 - 如果使用者要求建立提醒、行事曆、待辦
   - 應優先回傳 `calendar_action` 或 `task_action`。
 - 如果使用者要求幫忙操作網站到結帳前
-  - 應回傳 `browser_request`，並在 `warnings` 中提醒最終付款仍需使用者確認。
+  - 這仍屬下一階段功能，請在 `final_reply` 與 `warnings` 中清楚說明目前尚未啟用，不要輸出任何假裝已經可執行的自動化結果。

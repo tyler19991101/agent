@@ -73,7 +73,6 @@ class DifyAgentClient:
             '  "memory_actions": ["save_profile | update_profile | forget_profile | save_account | forget_account"],\n'
             '  "calendar_action": {"operation":"create_event | update_event | cancel_event | list_events","summary":"string","description":"string","start":"ISO-8601","end":"ISO-8601"},\n'
             '  "task_action": {"operation":"create_task | complete_task | list_tasks | delete_task","title":"string","notes":"string","due":"ISO-8601","task_id":"string"},\n'
-            '  "browser_request": {"domain":"string","intent":"string","target_items":["string"],"user_profile_fields_needed":["string"],"stop_before_payment":true},\n'
             '  "requested_outputs": ["txt | docx | pdf"],\n'
             '  "document_title": "string"\n'
             "}\n"
@@ -87,7 +86,7 @@ class DifyAgentClient:
             "6-1. account_updates 可放需要長期記住的會員帳號識別資料，例如常用 email 或會員編號，但不要放密碼、信用卡、OTP。\n"
             "6-2. 若使用者要你記住、更新或忘記長期資料，請用 memory_actions、profile_updates、account_updates 表達。\n"
             "6-3. 若任務是建立 Google Calendar 行程或 Google Tasks 提醒，請用 calendar_action 或 task_action 輸出結構化操作需求。\n"
-            "6-4. 若任務是要系統代為操作網站到付款前，請用 browser_request 描述，不可假裝已經完成付款。\n\n"
+            "6-4. 網站自動操作到付款前仍屬下一階段功能；目前若使用者提出此需求，請在 final_reply 與 warnings 中清楚說明目前尚未啟用，且不要輸出 browser_request。\n\n"
             "7. 如果使用者要求輸出成 Word、PDF、TXT 或檔案，請在 requested_outputs 明確列出格式。\n"
             "8. document_title 要給出適合檔案命名的人類可讀標題。\n\n"
             "9. 若使用者使用相對日期，例如今天、明天、後天、下週一，必須以目前執行上下文中的 current_datetime_local 與 current_timezone 為唯一基準，不可自行猜測其他日期。\n"

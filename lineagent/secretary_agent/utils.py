@@ -54,6 +54,40 @@ def infer_requested_outputs(text: str) -> List[str]:
     return outputs
 
 
+def prefers_file_only_response(text: str) -> bool:
+    lowered = text.lower()
+    file_request_keywords = (
+        "輸出成",
+        "匯出成",
+        "轉成",
+        "做成",
+        "產出",
+        "生成",
+        "給我word",
+        "給我pdf",
+        "給我txt",
+        "只要檔案",
+        "只要文件",
+        "下載連結",
+        "word",
+        "docx",
+        "pdf",
+        "txt",
+    )
+    preview_keywords = (
+        "先看",
+        "先給我內容",
+        "先顯示",
+        "順便貼",
+        "摘要也要",
+        "內容也要",
+        "同時顯示",
+    )
+    requested_file = any(keyword in lowered for keyword in file_request_keywords)
+    wants_preview = any(keyword in lowered for keyword in preview_keywords)
+    return requested_file and not wants_preview
+
+
 def sanitize_filename(value: str, default: str = "artifact") -> str:
     normalized = unicodedata.normalize("NFKD", value).strip()
     ascii_safe = "".join(ch if ch.isalnum() or ch in {"-", "_", " "} else "_" for ch in normalized)

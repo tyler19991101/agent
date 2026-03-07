@@ -13,6 +13,7 @@ from secretary_agent.utils import (
     RESET_COMMANDS,
     infer_requested_outputs,
     looks_like_short_followup,
+    prefers_file_only_response,
 )
 
 
@@ -180,7 +181,10 @@ class SecretaryRuntime:
             final_text = self._build_final_text(plan)
             generated_artifacts = self._generate_requested_artifacts(run.id, run.user_goal, plan, final_text)
             if generated_artifacts:
-                final_text = self._append_artifact_links(final_text, generated_artifacts)
+                if prefers_file_only_response(run.user_goal):
+                    final_text = self._build_file_only_text(generated_artifacts)
+                else:
+                    final_text = self._append_artifact_links(final_text, generated_artifacts)
             self.store.add_artifact(run.id, kind="final_report", content=final_text)
             self.store.update_run_status(
                 run.id,
@@ -308,6 +312,14 @@ class SecretaryRuntime:
             label = f"{item['format'].upper()} - {item['filename']}"
             target = item["url"] or item["path"]
             lines.append(f"- {label}: {target}")
+        return "\n".join(lines)
+
+    def _build_file_only_text(self, artifacts: List[Dict[str, str]]) -> str:
+        lines = ["已完成，請下載檔案："]
+        for item in artifacts:
+            label = item["format"].upper()
+            target = item["url"] or item["path"]
+            lines.append(f"- {label}：{target}")
         return "\n".join(lines)
 
     def _should_resume_pending(self, pending: Any, inbound: InboundMessage, quoted_text: str) -> bool:

@@ -11,7 +11,7 @@ from secretary_agent.transport_line import (
     format_location_message,
     infer_media_metadata,
 )
-from secretary_agent.utils import infer_requested_outputs, split_text
+from secretary_agent.utils import infer_requested_outputs, prefers_file_only_response, split_text
 
 
 class FakeSettings:
@@ -161,11 +161,56 @@ class SecretaryRuntimeTest(unittest.TestCase):
         runtime.handle_inbound_message(self.inbound("幫我整理會議並輸出成 word 和 txt"))
         runtime.process_next_run()
         pushed = self.messenger.pushes[0][1]
-        self.assertIn("輸出檔案：", pushed)
+        self.assertIn("已完成，請下載檔案：", pushed)
         self.assertIn("DOCX", pushed)
         self.assertIn("TXT", pushed)
         artifacts = self.store.get_artifacts(1, kind="generated_file")
         self.assertEqual(len(artifacts), 2)
+
+    def test_runtime_can_include_summary_and_artifact_links_when_user_wants_both(self):
+        runtime = SecretaryRuntime(
+            settings=FakeSettings(),
+            store=self.store,
+            messenger=self.messenger,
+            agent_client=FakeAgentClient(
+                [
+                    PlannerResult(
+                        task_type="information_request",
+                        final_reply="這是整理好的會議摘要",
+                        requested_outputs=["pdf"],
+                        document_title="會議摘要",
+                    )
+                ]
+            ),
+        )
+        runtime.handle_inbound_message(self.inbound("幫我整理成 PDF，摘要也要一起顯示"))
+        runtime.process_next_run()
+        pushed = self.messenger.pushes[0][1]
+        self.assertIn("這是整理好的會議摘要", pushed)
+        self.assertIn("輸出檔案：", pushed)
+        self.assertIn("PDF", pushed)
+
+    def test_runtime_prefers_file_only_response_when_user_only_wants_file(self):
+        runtime = SecretaryRuntime(
+            settings=FakeSettings(),
+            store=self.store,
+            messenger=self.messenger,
+            agent_client=FakeAgentClient(
+                [
+                    PlannerResult(
+                        task_type="information_request",
+                        final_reply="這是整理好的會議摘要",
+                        requested_outputs=["docx"],
+                        document_title="會議摘要",
+                    )
+                ]
+            ),
+        )
+        runtime.handle_inbound_message(self.inbound("幫我整理成 Word，最後只要給我檔案下載連結"))
+        runtime.process_next_run()
+        pushed = self.messenger.pushes[0][1]
+        self.assertTrue(pushed.startswith("已完成，請下載檔案："))
+        self.assertNotIn("這是整理好的會議摘要", pushed)
 
     def test_reset_clears_history_and_profile(self):
         self.store.append_history("user:U123", "user", "hello")
@@ -329,6 +374,10 @@ class SecretaryRuntimeTest(unittest.TestCase):
     def test_infer_requested_outputs_from_user_text(self):
         outputs = infer_requested_outputs("幫我整理內容，輸出成 Word、PDF 和 txt")
         self.assertEqual(outputs, ["docx", "pdf", "txt"])
+
+    def test_prefers_file_only_response(self):
+        self.assertTrue(prefers_file_only_response("幫我整理成 Word，最後只要給我檔案下載連結"))
+        self.assertFalse(prefers_file_only_response("幫我整理成 Word，摘要也要一起顯示"))
 
     def test_format_location_message_contains_address_and_coordinates(self):
         class FakeLocation:

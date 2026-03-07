@@ -1,11 +1,15 @@
+import json
 import logging
 import time
+from datetime import datetime, timedelta, timezone
 from threading import Event, Thread
 from typing import Any, Dict, List, Optional
 
+from secretary_agent.browser_automation import BrowserAutomationManager
 from secretary_agent.config import Settings
 from secretary_agent.artifact_generator import ArtifactGenerator
 from secretary_agent.dify_client import DifyAgentClient
+from secretary_agent.google_workspace import GoogleWorkspaceClient, GoogleWorkspaceError
 from secretary_agent.logging_utils import format_log_event
 from secretary_agent.memory import SQLiteStore
 from secretary_agent.models import InboundMessage, PlannerResult, TaskRun
@@ -15,6 +19,8 @@ from secretary_agent.utils import (
     RESET_COMMANDS,
     infer_requested_outputs,
     looks_like_short_followup,
+    normalize_service_name,
+    parse_memory_command,
     prefers_file_only_response,
 )
 
@@ -29,6 +35,8 @@ class SecretaryRuntime:
         store: SQLiteStore,
         messenger: Any,
         agent_client: Optional[DifyAgentClient] = None,
+        google_client: Optional[GoogleWorkspaceClient] = None,
+        browser_automation: Optional[BrowserAutomationManager] = None,
     ):
         self.settings = settings
         self.store = store
@@ -37,6 +45,11 @@ class SecretaryRuntime:
             api_key=settings.dify_api_key,
             base_url=settings.dify_base_url,
             user_prefix=settings.dify_user_prefix,
+        )
+        self.google_client = google_client or GoogleWorkspaceClient(settings)
+        self.browser_automation = browser_automation or BrowserAutomationManager(
+            settings=settings,
+            store=store,
         )
         self.artifact_generator = ArtifactGenerator(
             output_dir=settings.artifact_output_dir,
@@ -90,6 +103,11 @@ class SecretaryRuntime:
                 )
             )
             self._send_immediate_without_history(inbound, "已清除這個 LINE 身分的對話與偏好記憶。")
+            return
+
+        memory_command = parse_memory_command(text)
+        if memory_command:
+            self._handle_memory_command(inbound, memory_command)
             return
 
         self.store.append_history(inbound.memory_key, "user", text)
@@ -227,8 +245,7 @@ class SecretaryRuntime:
                 status="completed",
                 output_payload=self._planner_to_dict(plan),
             )
-            if plan.profile_updates:
-                self.store.update_profile(run.memory_key, plan.profile_updates)
+            self._apply_planner_memory_updates(run.memory_key, plan)
 
             plan.requested_outputs = self._merge_requested_outputs(run.user_goal, plan.requested_outputs)
 
@@ -266,6 +283,22 @@ class SecretaryRuntime:
                     self.store.set_approval_prompt_message(approval_id, message_ids[0])
                 self.store.append_history(run.memory_key, "assistant", prompt)
                 return
+
+            google_result = self._handle_google_workspace_action(run, plan)
+            if google_result.get("status") == "awaiting_google_auth":
+                return
+            if google_result.get("final_reply"):
+                plan.final_reply = self._merge_text(plan.final_reply, str(google_result["final_reply"]))
+            if google_result.get("action_links"):
+                plan.action_links.extend(google_result["action_links"])
+
+            browser_result = self._handle_browser_request(run, plan)
+            if browser_result.get("status") == "awaiting_sensitive_confirmation":
+                return
+            if browser_result.get("final_reply"):
+                plan.final_reply = self._merge_text(plan.final_reply, str(browser_result["final_reply"]))
+            if browser_result.get("action_links"):
+                plan.action_links.extend(browser_result["action_links"])
 
             final_text = self._build_final_text(plan)
             generated_artifacts = self._generate_requested_artifacts(run.id, run.user_goal, plan, final_text)
@@ -523,6 +556,321 @@ class SecretaryRuntime:
     def _memory_key_to_push_target(self, memory_key: str) -> str:
         return memory_key.split(":", 1)[1]
 
+    def _handle_memory_command(self, inbound: InboundMessage, command: Dict[str, Any]) -> None:
+        if command["type"] == "profile_save":
+            profile = self.store.update_profile(inbound.memory_key, command.get("profile_updates", {}))
+            self.store.log_memory_change(
+                inbound.memory_key,
+                command.get("change_type", "save_profile"),
+                {"profile_updates": command.get("profile_updates", {}), "profile": profile},
+            )
+        elif command["type"] == "profile_forget":
+            profile = self.store.remove_profile_fields(inbound.memory_key, command.get("fields", []))
+            self.store.log_memory_change(
+                inbound.memory_key,
+                command.get("change_type", "forget_profile"),
+                {"fields": command.get("fields", []), "profile": profile},
+            )
+        elif command["type"] == "account_save":
+            for item in command.get("account_updates", []):
+                self.store.upsert_connected_account(
+                    inbound.memory_key,
+                    service_name=normalize_service_name(str(item.get("service_name", ""))),
+                    login_identifier=str(item.get("login_identifier", "")).strip(),
+                    display_name=str(item.get("display_name", "")).strip(),
+                    metadata={"source": "line_memory_command"},
+                )
+            self.store.log_memory_change(
+                inbound.memory_key,
+                command.get("change_type", "save_account"),
+                {"account_updates": command.get("account_updates", [])},
+            )
+        elif command["type"] == "account_forget":
+            deleted = self.store.forget_connected_account(
+                inbound.memory_key,
+                service_name=normalize_service_name(command.get("service_name", "")),
+            )
+            self.store.log_memory_change(
+                inbound.memory_key,
+                command.get("change_type", "forget_account"),
+                {"service_name": command.get("service_name", ""), "deleted": deleted},
+            )
+        self.store.append_history(inbound.memory_key, "user", inbound.text)
+        self._send_immediate_without_history(inbound, command["reply_text"])
+        self.store.append_history(inbound.memory_key, "assistant", command["reply_text"])
+
+    def _apply_planner_memory_updates(self, memory_key: str, plan: PlannerResult) -> None:
+        if "forget_profile" in plan.memory_actions and plan.profile_updates:
+            profile = self.store.remove_profile_fields(memory_key, list(plan.profile_updates.keys()))
+            self.store.log_memory_change(
+                memory_key,
+                "planner_forget_profile",
+                {"fields": list(plan.profile_updates.keys()), "profile": profile},
+            )
+            plan.profile_updates = {}
+        if "forget_account" in plan.memory_actions:
+            for item in plan.account_updates:
+                service_name = normalize_service_name(str(item.get("service_name", "")).strip())
+                login_identifier = str(item.get("login_identifier", "")).strip() or None
+                if service_name:
+                    self.store.forget_connected_account(
+                        memory_key,
+                        service_name=service_name,
+                        login_identifier=login_identifier,
+                    )
+            if plan.account_updates:
+                self.store.log_memory_change(
+                    memory_key,
+                    "planner_forget_account",
+                    {"account_updates": plan.account_updates},
+                )
+            plan.account_updates = []
+        if plan.profile_updates:
+            profile = self.store.update_profile(memory_key, plan.profile_updates)
+            self.store.log_memory_change(
+                memory_key,
+                "planner_profile_update",
+                {"profile_updates": plan.profile_updates, "profile": profile},
+            )
+        for item in plan.account_updates:
+            service_name = normalize_service_name(str(item.get("service_name", "")).strip())
+            login_identifier = str(item.get("login_identifier", "")).strip()
+            if not service_name or not login_identifier:
+                continue
+            self.store.upsert_connected_account(
+                memory_key,
+                service_name=service_name,
+                login_identifier=login_identifier,
+                display_name=str(item.get("display_name", "")).strip() or login_identifier,
+                oauth_provider=str(item.get("oauth_provider", "")).strip(),
+                session_available=bool(item.get("session_available", False)),
+                metadata={k: v for k, v in item.items() if k not in {"service_name", "login_identifier", "display_name", "oauth_provider", "session_available"}},
+            )
+        if plan.account_updates:
+            self.store.log_memory_change(
+                memory_key,
+                "planner_account_update",
+                {"account_updates": plan.account_updates},
+            )
+
+    def _handle_google_workspace_action(self, run: TaskRun, plan: PlannerResult) -> Dict[str, Any]:
+        action = plan.calendar_action or plan.task_action
+        if not action:
+            return {}
+        if not self.google_client.is_configured:
+            return {
+                "final_reply": "目前尚未完成 Google 整合設定，因此暫時不能替你建立行程或提醒。",
+            }
+
+        account = self.store.get_primary_connected_account(run.memory_key, "google")
+        if not account:
+            state_token = self.google_client.new_state_token()
+            self.store.create_oauth_state(
+                state_token=state_token,
+                memory_key=run.memory_key,
+                provider="google",
+                run_id=run.id,
+                metadata={"goal": run.user_goal},
+            )
+            auth_url = f"{self.settings.public_base_url}/auth/google/start?state={state_token}"
+            prompt = (
+                "要替你建立 Google 行程/提醒，請先完成 Google 授權：\n"
+                f"{auth_url}\n"
+                "授權完成後，我會自動繼續處理。"
+            )
+            self.store.update_run_status(
+                run.id,
+                status="waiting_approval",
+                current_phase="awaiting_google_auth",
+                requires_approval=True,
+            )
+            push_target = self._memory_key_to_push_target(run.memory_key)
+            message_ids = self.messenger.push_text(push_target, prompt)
+            self.store.store_bot_messages(message_ids, self.messenger.split_for_storage(prompt))
+            self.store.append_history(run.memory_key, "assistant", prompt)
+            return {"status": "awaiting_google_auth"}
+
+        token_payload = self._account_token_payload(account)
+        try:
+            if plan.calendar_action:
+                result = self._execute_calendar_action(token_payload, plan.calendar_action)
+                self.store.upsert_connected_account(
+                    run.memory_key,
+                    service_name="google",
+                    login_identifier=str(account["login_identifier"]),
+                    display_name=str(account["display_name"]),
+                    oauth_provider="google",
+                    session_available=True,
+                    metadata=token_payload,
+                )
+                return {
+                    "final_reply": result["message"],
+                    "action_links": result.get("action_links", []),
+                }
+            if plan.task_action:
+                result = self._execute_task_action(token_payload, plan.task_action)
+                self.store.upsert_connected_account(
+                    run.memory_key,
+                    service_name="google",
+                    login_identifier=str(account["login_identifier"]),
+                    display_name=str(account["display_name"]),
+                    oauth_provider="google",
+                    session_available=True,
+                    metadata=token_payload,
+                )
+                return {
+                    "final_reply": result["message"],
+                    "action_links": result.get("action_links", []),
+                }
+        except GoogleWorkspaceError as err:
+            self.logger.exception(
+                format_log_event(
+                    "google_workspace_action_failed",
+                    run_id=run.id,
+                    memory_key=run.memory_key,
+                    error_type=type(err).__name__,
+                )
+            )
+            return {
+                "final_reply": "Google 行程/提醒處理失敗，已記錄錯誤並請你稍後再試。",
+            }
+        return {}
+
+    def _execute_calendar_action(self, token_payload: Dict[str, Any], action: Dict[str, Any]) -> Dict[str, Any]:
+        operation = str(action.get("operation", "")).strip()
+        if operation == "create_event":
+            event = {
+                "summary": str(action.get("summary", "")).strip() or "LINE 助理建立的行程",
+                "description": str(action.get("description", "")).strip(),
+                "start": {"dateTime": str(action.get("start", "")).strip()},
+                "end": {"dateTime": str(action.get("end", "")).strip()},
+            }
+            timezone_name = str(action.get("timezone", "Asia/Taipei")).strip() or "Asia/Taipei"
+            event["start"]["timeZone"] = timezone_name
+            event["end"]["timeZone"] = timezone_name
+            created = self.google_client.create_event(token_payload, event)
+            return {
+                "message": f"已替你建立 Google 行程：{created['summary']}",
+                "action_links": ([{"label": "開啟 Google Calendar", "url": created["html_link"]}] if created.get("html_link") else []),
+            }
+        if operation == "list_events":
+            now = datetime.now(timezone.utc)
+            time_min = str(action.get("time_min", "")).strip() or now.isoformat()
+            time_max = str(action.get("time_max", "")).strip() or (now + timedelta(days=7)).isoformat()
+            listed = self.google_client.list_events(token_payload, time_min=time_min, time_max=time_max)
+            items = listed.get("items", [])[:5]
+            if not items:
+                return {"message": "你的 Google Calendar 目前查不到符合條件的行程。"}
+            lines = ["你近期的 Google 行程："]
+            for item in items:
+                start = item.get("start", {}).get("dateTime") or item.get("start", {}).get("date") or ""
+                lines.append(f"- {item.get('summary', '未命名行程')}：{start}")
+            return {"message": "\n".join(lines)}
+        raise GoogleWorkspaceError(f"Unsupported calendar operation: {operation}")
+
+    def _execute_task_action(self, token_payload: Dict[str, Any], action: Dict[str, Any]) -> Dict[str, Any]:
+        operation = str(action.get("operation", "")).strip()
+        if operation == "create_task":
+            task = {
+                "title": str(action.get("title", "")).strip() or "LINE 助理建立的提醒",
+                "notes": str(action.get("notes", "")).strip(),
+            }
+            due = str(action.get("due", "")).strip()
+            if due:
+                task["due"] = due
+            created = self.google_client.create_task(token_payload, task)
+            return {
+                "message": f"已替你建立 Google Tasks 提醒：{created['title']}",
+                "action_links": ([{"label": "查看 Google Tasks", "url": created.get("web_view_link", "")}] if created.get("web_view_link") else []),
+            }
+        if operation == "list_tasks":
+            listed = self.google_client.list_tasks(token_payload)
+            items = listed.get("items", [])[:5]
+            if not items:
+                return {"message": "你的 Google Tasks 目前沒有待辦事項。"}
+            lines = ["你目前的待辦事項："]
+            for item in items:
+                lines.append(f"- {item.get('title', '未命名待辦')}")
+            return {"message": "\n".join(lines)}
+        if operation == "complete_task":
+            task_id = str(action.get("task_id", "")).strip()
+            if not task_id:
+                raise GoogleWorkspaceError("Missing task_id for complete_task")
+            updated = self.google_client.complete_task(token_payload, task_id=task_id)
+            return {"message": f"已替你完成待辦：{updated['title']}"}
+        raise GoogleWorkspaceError(f"Unsupported task operation: {operation}")
+
+    def _handle_browser_request(self, run: TaskRun, plan: PlannerResult) -> Dict[str, Any]:
+        if not plan.browser_request:
+            return {}
+        profile = self.store.get_profile(run.memory_key)
+        accounts = self._serialize_accounts(run.memory_key)
+        checkpoint = self.browser_automation.create_checkpoint(
+            run_id=run.id,
+            memory_key=run.memory_key,
+            browser_request=plan.browser_request,
+            profile=profile,
+            accounts=accounts,
+        )
+        review_url = f"{self.settings.public_base_url}/automation/{checkpoint['checkpoint_token']}"
+        message = (
+            "我已整理好這次的自動操作需求，請先到確認頁檢查將使用的資料與步驟：\n"
+            f"{review_url}\n"
+            "確認後我會繼續往下一步。"
+        )
+        self.store.update_run_status(
+            run.id,
+            status="waiting_approval",
+            current_phase="awaiting_sensitive_confirmation",
+            requires_approval=True,
+        )
+        self.store.add_artifact(
+            run.id,
+            kind="browser_request",
+            content=json.dumps(plan.browser_request, ensure_ascii=False),
+            metadata={"review_url": review_url, "enabled": self.browser_automation.enabled},
+        )
+        push_target = self._memory_key_to_push_target(run.memory_key)
+        message_ids = self.messenger.push_text(push_target, message)
+        self.store.store_bot_messages(message_ids, self.messenger.split_for_storage(message))
+        self.store.append_history(run.memory_key, "assistant", message)
+        return {"status": "awaiting_sensitive_confirmation"}
+
+    def _serialize_accounts(self, memory_key: str) -> List[Dict[str, Any]]:
+        results: List[Dict[str, Any]] = []
+        for row in self.store.get_connected_accounts(memory_key):
+            results.append(
+                {
+                    "service_name": row["service_name"],
+                    "login_identifier": row["login_identifier"],
+                    "display_name": row["display_name"],
+                    "oauth_provider": row["oauth_provider"],
+                    "session_available": bool(row["session_available"]),
+                }
+            )
+        return results
+
+    @staticmethod
+    def _account_token_payload(account_row: Any) -> Dict[str, Any]:
+        import json
+
+        try:
+            return json.loads(account_row["metadata_json"] or "{}")
+        except json.JSONDecodeError:
+            return {}
+
+    @staticmethod
+    def _merge_text(primary: str, extra: str) -> str:
+        primary = (primary or "").strip()
+        extra = (extra or "").strip()
+        if not primary:
+            return extra
+        if not extra:
+            return primary
+        if extra in primary:
+            return primary
+        return f"{primary}\n\n{extra}"
+
     @staticmethod
     def _planner_to_dict(plan: PlannerResult) -> Dict[str, Any]:
         return {
@@ -542,6 +890,11 @@ class SecretaryRuntime:
             "warnings": plan.warnings,
             "missing_info": plan.missing_info,
             "profile_updates": plan.profile_updates,
+            "account_updates": plan.account_updates,
+            "memory_actions": plan.memory_actions,
+            "calendar_action": plan.calendar_action,
+            "task_action": plan.task_action,
+            "browser_request": plan.browser_request,
             "requested_outputs": plan.requested_outputs,
             "document_title": plan.document_title,
         }

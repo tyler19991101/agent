@@ -40,6 +40,11 @@ class PlannerResult:
     warnings: List[str] = field(default_factory=list)
     missing_info: List[str] = field(default_factory=list)
     profile_updates: Dict[str, Any] = field(default_factory=dict)
+    account_updates: List[Dict[str, Any]] = field(default_factory=list)
+    memory_actions: List[str] = field(default_factory=list)
+    calendar_action: Dict[str, Any] = field(default_factory=dict)
+    task_action: Dict[str, Any] = field(default_factory=dict)
+    browser_request: Dict[str, Any] = field(default_factory=dict)
     requested_outputs: List[str] = field(default_factory=list)
     document_title: str = ""
     raw_answer: str = ""
@@ -64,3 +69,15 @@ class SpeakerUtterance:
     text: str
     start_ms: int
     end_ms: int
+
+
+@dataclass
+class ConnectedAccount:
+    memory_key: str
+    service_name: str
+    login_identifier: str
+    display_name: str = ""
+    oauth_provider: str = ""
+    session_available: bool = False
+    last_verified_at: str = ""
+    metadata: Dict[str, Any] = field(default_factory=dict)

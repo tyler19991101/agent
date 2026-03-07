@@ -48,6 +48,38 @@
   ],
   "warnings": ["string"],
   "missing_info": ["string"],
+  "account_updates": [
+    {
+      "service_name": "string",
+      "login_identifier": "string",
+      "display_name": "string",
+      "oauth_provider": "string",
+      "session_available": false
+    }
+  ],
+  "memory_actions": ["save_profile | update_profile | forget_profile | save_account | forget_account"],
+  "calendar_action": {
+    "operation": "create_event | update_event | cancel_event | list_events",
+    "summary": "string",
+    "description": "string",
+    "start": "ISO-8601",
+    "end": "ISO-8601",
+    "timezone": "Asia/Taipei"
+  },
+  "task_action": {
+    "operation": "create_task | complete_task | list_tasks | delete_task",
+    "title": "string",
+    "notes": "string",
+    "due": "ISO-8601",
+    "task_id": "string"
+  },
+  "browser_request": {
+    "domain": "string",
+    "intent": "string",
+    "target_items": ["string"],
+    "user_profile_fields_needed": ["string"],
+    "stop_before_payment": true
+  },
   "requested_outputs": ["txt | docx | pdf"],
   "document_title": "string",
   "profile_updates": {
@@ -94,6 +126,16 @@
   - 若要輸出檔案，請提供適合檔名與文件標題的名稱。
 - `profile_updates`
   - 只保留可長期記住的穩定偏好。
+- `account_updates`
+  - 只放可長期保留的會員帳號識別資訊，例如常用 email 或會員編號，不可放密碼、信用卡、OTP。
+- `memory_actions`
+  - 若使用者要你記住、更新或忘記長期資料，請明確列出動作。
+- `calendar_action`
+  - 若要建立或查詢 Google Calendar 行程，請輸出結構化欄位，不要只寫在 final_reply。
+- `task_action`
+  - 若要建立或查詢 Google Tasks 提醒，請輸出結構化欄位。
+- `browser_request`
+  - 若使用者要求你代為操作網站、填資料、加入購物車、帶到付款前，請用這個欄位描述，不可假裝已完成付款。
 
 輸出準則：
 
@@ -106,3 +148,9 @@
   - 可以用工具讀完後再整理。
 - 如果工具查不到可靠資訊
   - 在 `warnings` 說明限制，不可捏造。
+- 如果使用者要求你記住他的常用資料或會員帳號
+  - 應優先回傳 `memory_actions`、`profile_updates`、`account_updates`。
+- 如果使用者要求建立提醒、行事曆、待辦
+  - 應優先回傳 `calendar_action` 或 `task_action`。
+- 如果使用者要求幫忙操作網站到結帳前
+  - 應回傳 `browser_request`，並在 `warnings` 中提醒最終付款仍需使用者確認。

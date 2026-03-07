@@ -2,7 +2,7 @@ import logging
 import os
 import threading
 
-from flask import Flask, abort, request, send_file
+from flask import Flask, abort, redirect, request, send_file
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.webhooks import (
@@ -89,6 +89,143 @@ def download_artifact(token: str):
     if not path or not os.path.isfile(path):
         abort(404)
     return send_file(path, as_attachment=True, download_name=filename)
+
+
+@app.route("/auth/google/start", methods=["GET"])
+def google_auth_start():
+    state_token = request.args.get("state", "").strip()
+    row = store.get_oauth_state(state_token)
+    if not row or row["status"] != "pending":
+        abort(404)
+    if not runtime.google_client.is_configured:
+        abort(503)
+    return redirect(runtime.google_client.build_auth_url(state_token))
+
+
+@app.route("/auth/google/callback", methods=["GET"])
+def google_auth_callback():
+    state_token = request.args.get("state", "").strip()
+    code = request.args.get("code", "").strip()
+    row = store.get_oauth_state(state_token)
+    if not row or row["status"] != "pending":
+        abort(404)
+    if not code:
+        abort(400)
+    try:
+        token_payload = runtime.google_client.exchange_code(code)
+        userinfo = runtime.google_client.fetch_userinfo(token_payload)
+        token_payload["userinfo"] = userinfo
+        store.upsert_connected_account(
+            row["memory_key"],
+            service_name="google",
+            login_identifier=str(userinfo.get("email", "")).strip() or "google-account",
+            display_name=str(userinfo.get("name", "")).strip() or str(userinfo.get("email", "")).strip(),
+            oauth_provider="google",
+            session_available=True,
+            metadata=token_payload,
+        )
+        store.log_memory_change(
+            row["memory_key"],
+            "google_account_connected",
+            {"email": userinfo.get("email", ""), "name": userinfo.get("name", "")},
+        )
+        store.resolve_oauth_state(state_token)
+        if row["run_id"]:
+            store.update_run_status(
+                int(row["run_id"]),
+                status="queued",
+                current_phase="google_auth_resolved",
+                requires_approval=False,
+            )
+        messenger.push_text(
+            runtime._memory_key_to_push_target(row["memory_key"]),
+            "Google 綁定成功，我會繼續處理你的行程或提醒需求。",
+        )
+        return (
+            "<h1>Google 綁定成功</h1>"
+            "<p>你可以回到 LINE，我會繼續處理剛剛的任務。</p>"
+        )
+    except Exception as err:
+        logger.exception(format_log_event("google_auth_callback_failed", error_type=type(err).__name__))
+        messenger.push_text(
+            runtime._memory_key_to_push_target(row["memory_key"]),
+            USER_SAFE_SYSTEM_ERROR_TEXT,
+        )
+        return (
+            "<h1>Google 綁定失敗</h1>"
+            "<p>系統已記錄錯誤，請回到 LINE 稍後再試。</p>"
+        ), 500
+
+
+@app.route("/automation/<token>", methods=["GET", "POST"])
+def automation_review(token: str):
+    checkpoint = store.get_sensitive_checkpoint(token)
+    if not checkpoint:
+        abort(404)
+    context = runtime.browser_automation.build_review_page_context(checkpoint)
+    if request.method == "POST":
+        action = request.form.get("action", "").strip().lower()
+        if action not in {"approve", "cancel"}:
+            abort(400)
+        store.resolve_sensitive_checkpoint(token, "approved" if action == "approve" else "cancelled")
+        automation = context["automation"]
+        if automation:
+            store.update_automation_run(
+                int(automation["id"]),
+                status="approved" if action == "approve" else "cancelled",
+                result_payload={"action": action},
+            )
+        target_id = runtime._memory_key_to_push_target(checkpoint["memory_key"])
+        if action == "cancel":
+            store.update_run_status(
+                int(checkpoint["run_id"]),
+                status="failed",
+                current_phase="cancelled",
+                error="User cancelled automation review",
+                finished=True,
+            )
+            messenger.push_text(target_id, "已取消這次自動操作任務。")
+            return "<h1>已取消</h1><p>這次自動操作任務已取消。</p>"
+
+        store.update_run_status(
+            int(checkpoint["run_id"]),
+            status="failed",
+            current_phase="automation_reviewed",
+            error="Browser automation worker is not enabled in this environment",
+            finished=True,
+        )
+        messenger.push_text(
+            target_id,
+            "已收到你的確認。這個環境目前尚未啟用瀏覽器自動操作 worker，因此我先保留這次操作需求。",
+        )
+        return (
+            "<h1>已收到確認</h1>"
+            "<p>目前這個環境尚未啟用瀏覽器自動操作 worker，系統已保留這次操作需求。</p>"
+        )
+
+    request_payload = context["request_payload"]
+    browser_request = request_payload.get("browser_request", {})
+    profile_snapshot = request_payload.get("profile_snapshot", {})
+    target_items = browser_request.get("target_items", []) or []
+    fields_needed = browser_request.get("user_profile_fields_needed", []) or []
+    return f"""
+    <html>
+      <head><meta charset="utf-8"><title>自動操作確認</title></head>
+      <body style="font-family: -apple-system, sans-serif; max-width: 760px; margin: 32px auto; line-height: 1.6;">
+        <h1>自動操作確認</h1>
+        <p>網站：{browser_request.get("domain", "未指定")}</p>
+        <p>目標：{browser_request.get("intent", "未指定")}</p>
+        <p>項目：{", ".join(target_items) if target_items else "未指定"}</p>
+        <p>將使用的個人欄位：{", ".join(fields_needed) if fields_needed else "未指定"}</p>
+        <pre style="background:#f5f5f5;padding:16px;border-radius:8px;overflow:auto;">{profile_snapshot}</pre>
+        <form method="post" style="display:flex;gap:12px;">
+          <button type="submit" name="action" value="approve">確認</button>
+          <button type="submit" name="action" value="cancel">取消</button>
+        </form>
+        <p style="color:#666;">目前 v1 會先建立確認流程與資料檢查，正式瀏覽器自動執行 worker 需另外啟用。</p>
+      </body>
+    </html>
+    """
 
 
 @handler.add(MessageEvent, message=TextMessageContent)

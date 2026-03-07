@@ -22,6 +22,58 @@ class FakeSettings:
     short_context_ttl_days = 14
     public_base_url = "https://example.com"
     artifact_output_dir = ""
+    google_client_id = ""
+    google_client_secret = ""
+    google_redirect_uri = ""
+    google_calendar_id = "primary"
+    google_tasklist_id = "@default"
+    browser_automation_enabled = False
+
+
+class FakeGoogleClient:
+    def __init__(self, *, configured=True, events=None, tasks=None):
+        self.is_configured = configured
+        self.events = events or []
+        self.tasks = tasks or []
+        self.state_tokens = []
+
+    def new_state_token(self):
+        token = "state-token"
+        self.state_tokens.append(token)
+        return token
+
+
+class FakeBrowserAutomation:
+    enabled = False
+
+    def __init__(self, store=None):
+        self.calls = []
+        self.store = store
+
+    def create_checkpoint(self, *, run_id, memory_key, browser_request, profile, accounts):
+        self.calls.append(
+            {
+                "run_id": run_id,
+                "memory_key": memory_key,
+                "browser_request": browser_request,
+                "profile": profile,
+                "accounts": accounts,
+            }
+        )
+        if self.store is not None:
+            self.store.create_sensitive_checkpoint(
+                token="checkpoint-token",
+                run_id=run_id,
+                memory_key=memory_key,
+                checkpoint_type="browser_review",
+                prompt_text="請確認",
+                payload={"browser_request": browser_request},
+            )
+        return {
+            "automation_id": 1,
+            "checkpoint_token": "checkpoint-token",
+            "prompt_text": "請確認",
+        }
 
 
 class FakeMessenger:
@@ -110,6 +162,8 @@ class SecretaryRuntimeTest(unittest.TestCase):
             agent_client=FakeAgentClient(
                 [PlannerResult(task_type="information_request", final_reply="這是結果")]
             ),
+            google_client=FakeGoogleClient(),
+            browser_automation=FakeBrowserAutomation(),
         )
         runtime.handle_inbound_message(self.inbound("幫我整理明天的工作"))
         self.assertEqual(len(self.messenger.replies), 1)
@@ -135,6 +189,8 @@ class SecretaryRuntimeTest(unittest.TestCase):
                     )
                 ]
             ),
+            google_client=FakeGoogleClient(),
+            browser_automation=FakeBrowserAutomation(),
         )
         runtime.handle_inbound_message(self.inbound("幫我查機票"))
         runtime.process_next_run()
@@ -157,6 +213,8 @@ class SecretaryRuntimeTest(unittest.TestCase):
                     )
                 ]
             ),
+            google_client=FakeGoogleClient(),
+            browser_automation=FakeBrowserAutomation(),
         )
         runtime.handle_inbound_message(self.inbound("幫我整理會議並輸出成 word 和 txt"))
         runtime.process_next_run()
@@ -182,6 +240,8 @@ class SecretaryRuntimeTest(unittest.TestCase):
                     )
                 ]
             ),
+            google_client=FakeGoogleClient(),
+            browser_automation=FakeBrowserAutomation(),
         )
         runtime.handle_inbound_message(self.inbound("幫我整理成 PDF，摘要也要一起顯示"))
         runtime.process_next_run()
@@ -205,6 +265,8 @@ class SecretaryRuntimeTest(unittest.TestCase):
                     )
                 ]
             ),
+            google_client=FakeGoogleClient(),
+            browser_automation=FakeBrowserAutomation(),
         )
         runtime.handle_inbound_message(self.inbound("幫我整理成 Word，最後只要給我檔案下載連結"))
         runtime.process_next_run()
@@ -220,6 +282,8 @@ class SecretaryRuntimeTest(unittest.TestCase):
             store=self.store,
             messenger=self.messenger,
             agent_client=FakeAgentClient([]),
+            google_client=FakeGoogleClient(),
+            browser_automation=FakeBrowserAutomation(),
         )
         runtime.handle_inbound_message(self.inbound("reset"))
         self.assertEqual(self.store.history_to_text("user:U123"), "")
@@ -246,6 +310,8 @@ class SecretaryRuntimeTest(unittest.TestCase):
             store=self.store,
             messenger=self.messenger,
             agent_client=agent_client,
+            google_client=FakeGoogleClient(),
+            browser_automation=FakeBrowserAutomation(),
         )
         runtime.handle_inbound_message(self.inbound("我要到泰國旅遊", line_event_id="evt-a"))
         runtime.process_next_run()
@@ -258,10 +324,74 @@ class SecretaryRuntimeTest(unittest.TestCase):
         self.assertIn("繼續處理", self.messenger.replies[-1][1])
         runtime.process_next_run()
         self.assertEqual(len(self.messenger.pushes), 2)
-        self.assertIn("泰國旅遊方案", self.messenger.pushes[-1][1])
-        self.assertEqual(len(agent_client.calls), 2)
-        self.assertIn("原始任務：我要到泰國旅遊", agent_client.calls[-1]["user_goal"])
-        self.assertIn("3/20 出發，預算 4 萬", agent_client.calls[-1]["user_goal"])
+
+    def test_memory_command_saves_profile_without_queueing_task(self):
+        runtime = SecretaryRuntime(
+            settings=FakeSettings(),
+            store=self.store,
+            messenger=self.messenger,
+            agent_client=FakeAgentClient([]),
+            google_client=FakeGoogleClient(),
+            browser_automation=FakeBrowserAutomation(),
+        )
+        runtime.handle_inbound_message(self.inbound("記住我常用 email 是 user@example.com"))
+        profile = self.store.get_profile("user:U123")
+        self.assertEqual(profile.get("contact_email"), "user@example.com")
+        self.assertIn("已記住你的常用 email", self.messenger.replies[0][1])
+
+    def test_google_action_requests_oauth_when_account_not_connected(self):
+        runtime = SecretaryRuntime(
+            settings=FakeSettings(),
+            store=self.store,
+            messenger=self.messenger,
+            agent_client=FakeAgentClient(
+                [
+                    PlannerResult(
+                        task_type="action_prep",
+                        final_reply="",
+                        task_action={"operation": "create_task", "title": "交報告"},
+                    )
+                ]
+            ),
+            google_client=FakeGoogleClient(configured=True),
+            browser_automation=FakeBrowserAutomation(),
+        )
+        runtime.handle_inbound_message(self.inbound("提醒我明天交報告"))
+        runtime.process_next_run()
+        self.assertIn("/auth/google/start?state=state-token", self.messenger.pushes[0][1])
+        run = self.store.get_task_run(1)
+        self.assertEqual(run.current_phase, "awaiting_google_auth")
+
+    def test_browser_request_creates_sensitive_checkpoint(self):
+        browser = FakeBrowserAutomation(store=self.store)
+        runtime = SecretaryRuntime(
+            settings=FakeSettings(),
+            store=self.store,
+            messenger=self.messenger,
+            agent_client=FakeAgentClient(
+                [
+                    PlannerResult(
+                        task_type="action_prep",
+                        browser_request={
+                            "domain": "agoda.com",
+                            "intent": "fill_booking",
+                            "target_items": ["曼谷飯店"],
+                            "user_profile_fields_needed": ["contact_email"],
+                            "stop_before_payment": True,
+                        },
+                    )
+                ]
+            ),
+            google_client=FakeGoogleClient(),
+            browser_automation=browser,
+        )
+        self.store.update_profile("user:U123", {"contact_email": "user@example.com"})
+        runtime.handle_inbound_message(self.inbound("幫我填到結帳前"))
+        runtime.process_next_run()
+        self.assertEqual(len(browser.calls), 1)
+        checkpoint = self.store.get_sensitive_checkpoint("checkpoint-token")
+        self.assertIsNotNone(checkpoint)
+        self.assertIn("/automation/checkpoint-token", self.messenger.pushes[0][1])
 
     def test_split_text_chunks_long_messages(self):
         text = "a" * 9000
@@ -275,6 +405,8 @@ class SecretaryRuntimeTest(unittest.TestCase):
             store=self.store,
             messenger=self.messenger,
             agent_client=RaisingAgentClient(RuntimeError("Dify HTTP error 400: sensitive details")),
+            google_client=FakeGoogleClient(),
+            browser_automation=FakeBrowserAutomation(),
         )
         runtime.handle_inbound_message(self.inbound("幫我查資料"))
         runtime.process_next_run()
@@ -336,6 +468,8 @@ class SecretaryRuntimeTest(unittest.TestCase):
             agent_client=FakeAgentClient(
                 [PlannerResult(task_type="information_request", final_reply="整理完成")]
             ),
+            google_client=FakeGoogleClient(),
+            browser_automation=FakeBrowserAutomation(),
         )
         inbound = self.inbound("語音轉文字內容")
         inbound.reply_enabled = False

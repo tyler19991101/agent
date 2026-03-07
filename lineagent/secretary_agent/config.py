@@ -23,6 +23,12 @@ class Settings:
     database_path: str
     worker_poll_seconds: float
     short_context_ttl_days: int
+    google_client_id: str
+    google_client_secret: str
+    google_redirect_uri: str
+    google_calendar_id: str
+    google_tasklist_id: str
+    browser_automation_enabled: bool
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -56,6 +62,13 @@ class Settings:
             ).strip(),
             worker_poll_seconds=float(os.getenv("WORKER_POLL_SECONDS", "1.5")),
             short_context_ttl_days=int(os.getenv("SHORT_CONTEXT_TTL_DAYS", "7")),
+            google_client_id=os.getenv("GOOGLE_CLIENT_ID", "").strip(),
+            google_client_secret=os.getenv("GOOGLE_CLIENT_SECRET", "").strip(),
+            google_redirect_uri=os.getenv("GOOGLE_REDIRECT_URI", "").strip(),
+            google_calendar_id=os.getenv("GOOGLE_CALENDAR_ID", "primary").strip(),
+            google_tasklist_id=os.getenv("GOOGLE_TASKLIST_ID", "@default").strip(),
+            browser_automation_enabled=os.getenv("BROWSER_AUTOMATION_ENABLED", "0").strip().lower()
+            in {"1", "true", "yes", "on"},
         )
         missing = [
             name

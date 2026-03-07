@@ -89,6 +89,65 @@ class SQLiteStore:
                         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
                     );
 
+                    CREATE TABLE IF NOT EXISTS connected_accounts (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        memory_key TEXT NOT NULL,
+                        service_name TEXT NOT NULL,
+                        login_identifier TEXT NOT NULL,
+                        display_name TEXT NOT NULL DEFAULT '',
+                        oauth_provider TEXT NOT NULL DEFAULT '',
+                        session_available INTEGER NOT NULL DEFAULT 0,
+                        last_verified_at DATETIME,
+                        metadata_json TEXT NOT NULL DEFAULT '{}',
+                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(memory_key, service_name, login_identifier)
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_connected_accounts_memory ON connected_accounts(memory_key, service_name);
+
+                    CREATE TABLE IF NOT EXISTS oauth_states (
+                        state_token TEXT PRIMARY KEY,
+                        memory_key TEXT NOT NULL,
+                        provider TEXT NOT NULL,
+                        run_id INTEGER,
+                        metadata_json TEXT NOT NULL DEFAULT '{}',
+                        status TEXT NOT NULL DEFAULT 'pending',
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        resolved_at DATETIME
+                    );
+
+                    CREATE TABLE IF NOT EXISTS memory_change_log (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        memory_key TEXT NOT NULL,
+                        change_type TEXT NOT NULL,
+                        payload_json TEXT NOT NULL DEFAULT '{}',
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                    );
+
+                    CREATE TABLE IF NOT EXISTS automation_runs (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        run_id INTEGER NOT NULL,
+                        memory_key TEXT NOT NULL,
+                        domain TEXT NOT NULL,
+                        intent TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        request_json TEXT NOT NULL DEFAULT '{}',
+                        result_json TEXT NOT NULL DEFAULT '{}',
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                    );
+
+                    CREATE TABLE IF NOT EXISTS sensitive_checkpoints (
+                        token TEXT PRIMARY KEY,
+                        run_id INTEGER NOT NULL,
+                        memory_key TEXT NOT NULL,
+                        checkpoint_type TEXT NOT NULL,
+                        prompt_text TEXT NOT NULL,
+                        payload_json TEXT NOT NULL DEFAULT '{}',
+                        status TEXT NOT NULL DEFAULT 'pending',
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        resolved_at DATETIME
+                    );
+
                     CREATE TABLE IF NOT EXISTS pending_approvals (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         run_id INTEGER NOT NULL,
@@ -230,6 +289,11 @@ class SQLiteStore:
             with self.connect() as conn:
                 conn.execute("DELETE FROM conversation_history WHERE memory_key = ?", (memory_key,))
                 conn.execute("DELETE FROM user_profiles WHERE memory_key = ?", (memory_key,))
+                conn.execute("DELETE FROM connected_accounts WHERE memory_key = ?", (memory_key,))
+                conn.execute("DELETE FROM oauth_states WHERE memory_key = ?", (memory_key,))
+                conn.execute("DELETE FROM memory_change_log WHERE memory_key = ?", (memory_key,))
+                conn.execute("DELETE FROM automation_runs WHERE memory_key = ?", (memory_key,))
+                conn.execute("DELETE FROM sensitive_checkpoints WHERE memory_key = ?", (memory_key,))
                 conn.execute(
                     "UPDATE pending_approvals SET status = 'cancelled', resolved_at = CURRENT_TIMESTAMP WHERE memory_key = ? AND status = 'pending'",
                     (memory_key,),
@@ -267,6 +331,258 @@ class SQLiteStore:
                 )
                 conn.commit()
         return profile
+
+    def remove_profile_fields(self, memory_key: str, fields: List[str]) -> Dict[str, Any]:
+        profile = self.get_profile(memory_key)
+        for field in fields:
+            profile.pop(field, None)
+        with self.lock:
+            with self.connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO user_profiles(memory_key, profile_json, updated_at)
+                    VALUES (?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(memory_key) DO UPDATE SET
+                        profile_json = excluded.profile_json,
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    (memory_key, json.dumps(profile, ensure_ascii=False)),
+                )
+                conn.commit()
+        return profile
+
+    def log_memory_change(self, memory_key: str, change_type: str, payload: Dict[str, Any]) -> None:
+        with self.lock:
+            with self.connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO memory_change_log(memory_key, change_type, payload_json)
+                    VALUES (?, ?, ?)
+                    """,
+                    (memory_key, change_type, json.dumps(payload, ensure_ascii=False)),
+                )
+                conn.commit()
+
+    def upsert_connected_account(
+        self,
+        memory_key: str,
+        *,
+        service_name: str,
+        login_identifier: str,
+        display_name: str = "",
+        oauth_provider: str = "",
+        session_available: bool = False,
+        last_verified_at: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        with self.lock:
+            with self.connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO connected_accounts(
+                        memory_key, service_name, login_identifier, display_name, oauth_provider,
+                        session_available, last_verified_at, metadata_json, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(memory_key, service_name, login_identifier) DO UPDATE SET
+                        display_name = excluded.display_name,
+                        oauth_provider = excluded.oauth_provider,
+                        session_available = excluded.session_available,
+                        last_verified_at = excluded.last_verified_at,
+                        metadata_json = excluded.metadata_json,
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    (
+                        memory_key,
+                        service_name,
+                        login_identifier,
+                        display_name,
+                        oauth_provider,
+                        1 if session_available else 0,
+                        last_verified_at or datetime.utcnow().isoformat(),
+                        json.dumps(metadata or {}, ensure_ascii=False),
+                    ),
+                )
+                conn.commit()
+
+    def get_connected_accounts(self, memory_key: str, service_name: Optional[str] = None) -> List[sqlite3.Row]:
+        query = "SELECT * FROM connected_accounts WHERE memory_key = ?"
+        params: List[Any] = [memory_key]
+        if service_name:
+            query += " AND service_name = ?"
+            params.append(service_name)
+        query += " ORDER BY updated_at DESC, id DESC"
+        with self.lock:
+            with self.connect() as conn:
+                return conn.execute(query, tuple(params)).fetchall()
+
+    def get_primary_connected_account(self, memory_key: str, service_name: str) -> Optional[sqlite3.Row]:
+        rows = self.get_connected_accounts(memory_key, service_name=service_name)
+        return rows[0] if rows else None
+
+    def forget_connected_account(
+        self,
+        memory_key: str,
+        *,
+        service_name: str,
+        login_identifier: Optional[str] = None,
+    ) -> int:
+        query = "DELETE FROM connected_accounts WHERE memory_key = ? AND service_name = ?"
+        params: List[Any] = [memory_key, service_name]
+        if login_identifier:
+            query += " AND login_identifier = ?"
+            params.append(login_identifier)
+        with self.lock:
+            with self.connect() as conn:
+                cursor = conn.execute(query, tuple(params))
+                conn.commit()
+                return int(cursor.rowcount or 0)
+
+    def create_oauth_state(
+        self,
+        *,
+        state_token: str,
+        memory_key: str,
+        provider: str,
+        run_id: Optional[int] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        with self.lock:
+            with self.connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO oauth_states(state_token, memory_key, provider, run_id, metadata_json, status)
+                    VALUES (?, ?, ?, ?, ?, 'pending')
+                    """,
+                    (
+                        state_token,
+                        memory_key,
+                        provider,
+                        run_id,
+                        json.dumps(metadata or {}, ensure_ascii=False),
+                    ),
+                )
+                conn.commit()
+
+    def get_oauth_state(self, state_token: str) -> Optional[sqlite3.Row]:
+        with self.lock:
+            with self.connect() as conn:
+                return conn.execute(
+                    "SELECT * FROM oauth_states WHERE state_token = ? LIMIT 1",
+                    (state_token,),
+                ).fetchone()
+
+    def resolve_oauth_state(self, state_token: str) -> None:
+        with self.lock:
+            with self.connect() as conn:
+                conn.execute(
+                    """
+                    UPDATE oauth_states
+                    SET status = 'resolved', resolved_at = CURRENT_TIMESTAMP
+                    WHERE state_token = ?
+                    """,
+                    (state_token,),
+                )
+                conn.commit()
+
+    def create_automation_run(
+        self,
+        *,
+        run_id: int,
+        memory_key: str,
+        domain: str,
+        intent: str,
+        status: str,
+        request_payload: Dict[str, Any],
+    ) -> int:
+        with self.lock:
+            with self.connect() as conn:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO automation_runs(run_id, memory_key, domain, intent, status, request_json)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        run_id,
+                        memory_key,
+                        domain,
+                        intent,
+                        status,
+                        json.dumps(request_payload, ensure_ascii=False),
+                    ),
+                )
+                conn.commit()
+                return int(cursor.lastrowid)
+
+    def update_automation_run(self, automation_id: int, *, status: str, result_payload: Optional[Dict[str, Any]] = None) -> None:
+        with self.lock:
+            with self.connect() as conn:
+                conn.execute(
+                    """
+                    UPDATE automation_runs
+                    SET status = ?, result_json = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (status, json.dumps(result_payload or {}, ensure_ascii=False), automation_id),
+                )
+                conn.commit()
+
+    def get_automation_run(self, automation_id: int) -> Optional[sqlite3.Row]:
+        with self.lock:
+            with self.connect() as conn:
+                return conn.execute(
+                    "SELECT * FROM automation_runs WHERE id = ? LIMIT 1",
+                    (automation_id,),
+                ).fetchone()
+
+    def create_sensitive_checkpoint(
+        self,
+        *,
+        token: str,
+        run_id: int,
+        memory_key: str,
+        checkpoint_type: str,
+        prompt_text: str,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        with self.lock:
+            with self.connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO sensitive_checkpoints(token, run_id, memory_key, checkpoint_type, prompt_text, payload_json, status)
+                    VALUES (?, ?, ?, ?, ?, ?, 'pending')
+                    """,
+                    (
+                        token,
+                        run_id,
+                        memory_key,
+                        checkpoint_type,
+                        prompt_text,
+                        json.dumps(payload or {}, ensure_ascii=False),
+                    ),
+                )
+                conn.commit()
+
+    def get_sensitive_checkpoint(self, token: str) -> Optional[sqlite3.Row]:
+        with self.lock:
+            with self.connect() as conn:
+                return conn.execute(
+                    "SELECT * FROM sensitive_checkpoints WHERE token = ? LIMIT 1",
+                    (token,),
+                ).fetchone()
+
+    def resolve_sensitive_checkpoint(self, token: str, status: str) -> None:
+        with self.lock:
+            with self.connect() as conn:
+                conn.execute(
+                    """
+                    UPDATE sensitive_checkpoints
+                    SET status = ?, resolved_at = CURRENT_TIMESTAMP
+                    WHERE token = ?
+                    """,
+                    (status, token),
+                )
+                conn.commit()
 
     def create_task_run(
         self,
@@ -561,6 +877,23 @@ class SQLiteStore:
 
     def build_runtime_context(self, run_id: int, memory_key: str) -> Dict[str, Any]:
         approval = self.get_latest_resolved_approval(run_id)
+        accounts = []
+        for row in self.get_connected_accounts(memory_key):
+            try:
+                metadata = json.loads(row["metadata_json"] or "{}")
+            except json.JSONDecodeError:
+                metadata = {}
+            accounts.append(
+                {
+                    "service_name": row["service_name"],
+                    "login_identifier": row["login_identifier"],
+                    "display_name": row["display_name"],
+                    "oauth_provider": row["oauth_provider"],
+                    "session_available": bool(row["session_available"]),
+                    "last_verified_at": row["last_verified_at"] or "",
+                    "metadata": metadata,
+                }
+            )
         artifacts = [
             {
                 "kind": row["kind"],
@@ -572,6 +905,7 @@ class SQLiteStore:
         return {
             "history": self.history_to_text(memory_key),
             "profile": self.get_profile(memory_key),
+            "connected_accounts": accounts,
             "artifacts": artifacts,
             "latest_approval_response": approval["response_text"] if approval else "",
         }

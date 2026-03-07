@@ -69,6 +69,11 @@ class DifyAgentClient:
             '  "warnings": ["string"],\n'
             '  "missing_info": ["string"],\n'
             '  "profile_updates": {"key":"value"},\n'
+            '  "account_updates": [{"service_name":"string","login_identifier":"string","display_name":"string","oauth_provider":"string","session_available":false}],\n'
+            '  "memory_actions": ["save_profile | update_profile | forget_profile | save_account | forget_account"],\n'
+            '  "calendar_action": {"operation":"create_event | update_event | cancel_event | list_events","summary":"string","description":"string","start":"ISO-8601","end":"ISO-8601"},\n'
+            '  "task_action": {"operation":"create_task | complete_task | list_tasks | delete_task","title":"string","notes":"string","due":"ISO-8601","task_id":"string"},\n'
+            '  "browser_request": {"domain":"string","intent":"string","target_items":["string"],"user_profile_fields_needed":["string"],"stop_before_payment":true},\n'
             '  "requested_outputs": ["txt | docx | pdf"],\n'
             '  "document_title": "string"\n'
             "}\n"
@@ -79,6 +84,10 @@ class DifyAgentClient:
             "4. 如果需要使用者做選擇或確認，requires_approval=true。\n"
             "5. action_links 只能放官方或可信賴站點的下一步連結。\n"
             "6. profile_updates 只填可穩定記住的偏好。\n\n"
+            "6-1. account_updates 可放需要長期記住的會員帳號識別資料，例如常用 email 或會員編號，但不要放密碼、信用卡、OTP。\n"
+            "6-2. 若使用者要你記住、更新或忘記長期資料，請用 memory_actions、profile_updates、account_updates 表達。\n"
+            "6-3. 若任務是建立 Google Calendar 行程或 Google Tasks 提醒，請用 calendar_action 或 task_action 輸出結構化操作需求。\n"
+            "6-4. 若任務是要系統代為操作網站到付款前，請用 browser_request 描述，不可假裝已經完成付款。\n\n"
             "7. 如果使用者要求輸出成 Word、PDF、TXT 或檔案，請在 requested_outputs 明確列出格式。\n"
             "8. document_title 要給出適合檔案命名的人類可讀標題。\n\n"
             f"使用者最新目標：{user_goal}\n"
@@ -139,6 +148,11 @@ class DifyAgentClient:
             warnings=list(payload.get("warnings", []) or []),
             missing_info=list(payload.get("missing_info", []) or []),
             profile_updates=dict(payload.get("profile_updates", {}) or {}),
+            account_updates=list(payload.get("account_updates", []) or []),
+            memory_actions=list(payload.get("memory_actions", []) or []),
+            calendar_action=dict(payload.get("calendar_action", {}) or {}),
+            task_action=dict(payload.get("task_action", {}) or {}),
+            browser_request=dict(payload.get("browser_request", {}) or {}),
             requested_outputs=list(payload.get("requested_outputs", []) or []),
             document_title=str(payload.get("document_title", "")),
             raw_answer=answer,

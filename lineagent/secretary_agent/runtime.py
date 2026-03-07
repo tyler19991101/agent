@@ -3,7 +3,7 @@ import logging
 import time
 from datetime import datetime, timedelta, timezone
 from threading import Event, Thread
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from secretary_agent.browser_automation import BrowserAutomationManager
 from secretary_agent.config import Settings
@@ -117,13 +117,23 @@ class SecretaryRuntime:
         pending = self.store.get_open_approval(inbound.memory_key)
         quoted_text = self.store.get_bot_message_content(inbound.quoted_message_id)
         if pending and self._should_resume_pending(pending, inbound, quoted_text):
+            approval_metadata = {"quoted_message_id": inbound.quoted_message_id or ""}
+            selected_option = self._match_pending_approval_option(pending, text)
+            if self._approval_requires_option_selection(pending) and not selected_option:
+                self._respond_immediate(
+                    inbound,
+                    "我還沒辨識到你要選哪一個事項，請直接回覆選項編號或完整事項名稱，例如 1。",
+                )
+                return
+            if selected_option:
+                approval_metadata["selected_option"] = selected_option
             self.store.resolve_approval(int(pending["id"]), text)
             self.store.add_artifact(
                 int(pending["run_id"]),
                 kind="approval_response",
                 content=text,
                 ref_key=f"approval:{pending['id']}",
-                metadata={"quoted_message_id": inbound.quoted_message_id or ""},
+                metadata=approval_metadata,
             )
             self.store.update_run_status(
                 int(pending["run_id"]),
@@ -291,7 +301,7 @@ class SecretaryRuntime:
                 return
 
             google_result = self._handle_google_workspace_action(run, plan)
-            if google_result.get("status") == "awaiting_google_auth":
+            if google_result.get("status") in {"awaiting_google_auth", "awaiting_approval"}:
                 return
             if google_result.get("final_reply"):
                 if google_result.get("authoritative"):
@@ -706,7 +716,9 @@ class SecretaryRuntime:
 
             token_payload = self._account_token_payload(account)
             if plan.calendar_action:
-                result = self._execute_calendar_action(token_payload, plan.calendar_action)
+                result = self._execute_calendar_action(run, token_payload, plan.calendar_action)
+                if result.get("status") == "awaiting_approval":
+                    return result
                 self.store.upsert_connected_account(
                     run.memory_key,
                     service_name="google",
@@ -722,7 +734,9 @@ class SecretaryRuntime:
                     "authoritative": True,
                 }
             if plan.task_action:
-                result = self._execute_task_action(token_payload, plan.task_action)
+                result = self._execute_task_action(run, token_payload, plan.task_action)
+                if result.get("status") == "awaiting_approval":
+                    return result
                 self.store.upsert_connected_account(
                     run.memory_key,
                     service_name="google",
@@ -755,9 +769,11 @@ class SecretaryRuntime:
             self.current_memory_key_for_resolution = ""
         return {}
 
-    def _execute_calendar_action(self, token_payload: Dict[str, Any], action: Dict[str, Any]) -> Dict[str, Any]:
+    def _execute_calendar_action(self, run: TaskRun, token_payload: Dict[str, Any], action: Dict[str, Any]) -> Dict[str, Any]:
         operation = str(action.get("operation", "")).strip()
-        event_id = str(action.get("event_id", "")).strip() or self._resolve_recent_service_id("google_event", action)
+        event_id, pending_result = self._resolve_service_target(run, "google_event", action)
+        if pending_result:
+            return pending_result
         if operation == "create_event":
             event = {
                 "summary": str(action.get("summary", "")).strip() or "LINE 助理建立的行程",
@@ -848,9 +864,11 @@ class SecretaryRuntime:
             return {"message": "\n".join(lines)}
         raise GoogleWorkspaceError(f"Unsupported calendar operation: {operation}")
 
-    def _execute_task_action(self, token_payload: Dict[str, Any], action: Dict[str, Any]) -> Dict[str, Any]:
+    def _execute_task_action(self, run: TaskRun, token_payload: Dict[str, Any], action: Dict[str, Any]) -> Dict[str, Any]:
         operation = str(action.get("operation", "")).strip()
-        task_id = str(action.get("task_id", "")).strip() or self._resolve_recent_service_id("google_task", action)
+        task_id, pending_result = self._resolve_service_target(run, "google_task", action)
+        if pending_result:
+            return pending_result
         if operation == "create_task":
             task = {
                 "title": str(action.get("title", "")).strip() or "LINE 助理建立的提醒",
@@ -936,21 +954,183 @@ class SecretaryRuntime:
             return {"message": "已替你刪除 Google Tasks 提醒。"}
         raise GoogleWorkspaceError(f"Unsupported task operation: {operation}")
 
-    def _resolve_recent_service_id(self, kind: str, action: Dict[str, Any]) -> str:
-        summary = str(action.get("summary", "")).strip()
-        title = str(action.get("title", "")).strip()
-        target_name = summary or title
-        recent = self.store.get_recent_memory_artifacts(self.current_memory_key_for_resolution, kinds=[kind], limit=5)
+    def _resolve_service_target(
+        self,
+        run: TaskRun,
+        kind: str,
+        action: Dict[str, Any],
+    ) -> Tuple[str, Optional[Dict[str, Any]]]:
+        explicit_id = str(action.get("event_id") or action.get("task_id") or "").strip()
+        if explicit_id:
+            return explicit_id, None
+
+        selected_id = self._resolve_selected_service_id(kind)
+        if selected_id:
+            return selected_id, None
+
+        operation = str(action.get("operation", "")).strip()
+        if operation in {"create_event", "create_task", "list_events", "list_tasks"}:
+            return "", None
+
+        candidates = self._find_service_candidates(kind, action)
+        if len(candidates) == 1:
+            return str(candidates[0]["service_id"]), None
+        if not candidates:
+            return "", None
+        return "", self._request_service_target_selection(run, kind, candidates)
+
+    def _resolve_selected_service_id(self, kind: str) -> str:
+        recent = self.store.get_recent_memory_artifacts(
+            self.current_memory_key_for_resolution,
+            kinds=["approval_response"],
+            limit=5,
+        )
+        for row in recent:
+            try:
+                metadata = json.loads(row["metadata_json"] or "{}")
+            except json.JSONDecodeError:
+                metadata = {}
+            selected = metadata.get("selected_option") or {}
+            if str(selected.get("kind", "")).strip() != kind:
+                continue
+            service_id = str(selected.get("service_id") or "").strip()
+            if service_id:
+                return service_id
+        return ""
+
+    def _find_service_candidates(self, kind: str, action: Dict[str, Any]) -> List[Dict[str, Any]]:
+        target_name = self._normalize_service_target_name(
+            str(action.get("summary") or action.get("title") or "").strip()
+        )
+        recent = self.store.get_recent_memory_artifacts(self.current_memory_key_for_resolution, kinds=[kind], limit=8)
+        candidates: List[Dict[str, Any]] = []
+        partial_matches: List[Dict[str, Any]] = []
         for row in recent:
             try:
                 metadata = json.loads(row["metadata_json"] or "{}")
             except json.JSONDecodeError:
                 metadata = {}
             candidate_name = str(metadata.get("summary") or metadata.get("title") or row["content"] or "").strip()
-            if target_name and candidate_name and candidate_name != target_name:
+            candidate_norm = self._normalize_service_target_name(candidate_name)
+            service_id = str(metadata.get("event_id") or metadata.get("task_id") or row["ref_key"] or "").strip()
+            if not service_id:
                 continue
-            return str(metadata.get("event_id") or metadata.get("task_id") or row["ref_key"] or "")
-        return ""
+            candidate = {
+                "kind": kind,
+                "service_id": service_id,
+                "title": candidate_name or service_id,
+                "scheduled_at": str(metadata.get("start") or metadata.get("due") or ""),
+                "status": str(metadata.get("status") or ""),
+                "link": str(metadata.get("html_link") or metadata.get("web_view_link") or ""),
+            }
+            if not target_name:
+                candidates.append(candidate)
+                continue
+            if candidate_norm == target_name:
+                candidates.append(candidate)
+            elif target_name in candidate_norm or candidate_norm in target_name:
+                partial_matches.append(candidate)
+        if candidates:
+            return candidates
+        if len(partial_matches) == 1:
+            return partial_matches
+        if partial_matches:
+            return partial_matches
+        return candidates
+
+    def _request_service_target_selection(
+        self,
+        run: TaskRun,
+        kind: str,
+        candidates: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        lines = ["我找到多個可能要修改的事項，請直接回覆選項編號或完整事項名稱："]
+        options: List[Dict[str, Any]] = []
+        for idx, candidate in enumerate(candidates, start=1):
+            label = self._format_service_candidate_label(candidate)
+            lines.append(f"{idx}. {label}")
+            options.append(
+                {
+                    "kind": kind,
+                    "service_id": candidate["service_id"],
+                    "title": candidate["title"],
+                    "label": label,
+                    "scheduled_at": candidate.get("scheduled_at", ""),
+                    "status": candidate.get("status", ""),
+                    "link": candidate.get("link", ""),
+                }
+            )
+        prompt = "\n".join(lines)
+        approval_id = self.store.create_pending_approval(
+            run_id=run.id,
+            memory_key=run.memory_key,
+            approval_type="service_target_selection",
+            prompt_text=prompt,
+            options=options,
+        )
+        self.store.update_run_status(
+            run.id,
+            status="waiting_approval",
+            requires_approval=True,
+            current_phase="waiting_target_selection",
+        )
+        push_target = self._memory_key_to_push_target(run.memory_key)
+        message_ids = self.messenger.push_text(push_target, prompt)
+        self.store.store_bot_messages(message_ids, self.messenger.split_for_storage(prompt))
+        if message_ids:
+            self.store.set_approval_prompt_message(approval_id, message_ids[0])
+        self.store.append_history(run.memory_key, "assistant", prompt)
+        self.logger.info(
+            format_log_event(
+                "service_target_selection_requested",
+                run_id=run.id,
+                approval_id=approval_id,
+                memory_key=run.memory_key,
+                service_kind=kind,
+                candidate_count=len(candidates),
+            )
+        )
+        return {"status": "awaiting_approval"}
+
+    def _format_service_candidate_label(self, candidate: Dict[str, Any]) -> str:
+        title = str(candidate.get("title", "")).strip() or "未命名事項"
+        scheduled_at = str(candidate.get("scheduled_at", "")).strip()
+        if scheduled_at:
+            readable = scheduled_at.replace("T", " ")
+            readable = readable.replace("+08:00", "").replace("Z", "")
+            return f"{title}（{readable}）"
+        return title
+
+    def _normalize_service_target_name(self, value: str) -> str:
+        return "".join(str(value).strip().lower().split())
+
+    def _approval_requires_option_selection(self, pending: Any) -> bool:
+        return str(pending["approval_type"]).strip() == "service_target_selection"
+
+    def _match_pending_approval_option(self, pending: Any, text: str) -> Optional[Dict[str, Any]]:
+        try:
+            options = json.loads(pending["options_json"] or "[]")
+        except json.JSONDecodeError:
+            return None
+        if not options:
+            return None
+        response = str(text).strip()
+        if response.isdigit():
+            index = int(response) - 1
+            if 0 <= index < len(options):
+                return dict(options[index])
+        normalized = self._normalize_service_target_name(response)
+        matches = []
+        for option in options:
+            title = self._normalize_service_target_name(str(option.get("title", "")))
+            label = self._normalize_service_target_name(str(option.get("label", "")))
+            if normalized and normalized in {title, label}:
+                matches.append(option)
+            elif normalized and (normalized in title or normalized in label):
+                matches.append(option)
+        if len(matches) == 1:
+            return dict(matches[0])
+        return None
 
     def _store_service_artifact(self, *, run_kind: str, ref_key: str, title: str, metadata: Dict[str, Any]) -> None:
         run_id = getattr(self, "_active_run_id_for_service_artifacts", 0)

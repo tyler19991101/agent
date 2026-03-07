@@ -91,7 +91,7 @@ class DifyAgentClient:
             "8. document_title 要給出適合檔案命名的人類可讀標題。\n\n"
             "9. 若使用者使用相對日期，例如今天、明天、後天、下週一，必須以目前執行上下文中的 current_datetime_local 與 current_timezone 為唯一基準，不可自行猜測其他日期。\n"
             "10. 若使用者要求建立行程或提醒，calendar_action/task_action 中的日期時間必須與 relative date 解析結果一致。\n\n"
-            "11. 若使用者要求修改、延後、提前、取消剛剛建立的提醒或行程，請優先參考執行上下文中的 recent_service_artifacts，並在 task_action/calendar_action 中帶出對應的 task_id 或 event_id；若無法可靠判定，再改成追問。\n\n"
+            "11. 若使用者要求修改、延後、提前、取消剛剛建立的提醒或行程，請優先參考執行上下文中的 recent_service_artifacts，並在 task_action/calendar_action 中帶出對應的 task_id 或 event_id；若有多個可能目標，必須 requires_approval=true、approval_type=decision，先請使用者選擇；若無法可靠判定，再改成追問。\n\n"
             f"使用者最新目標：{user_goal}\n"
             f"目前執行上下文：\n{context_json}"
         )

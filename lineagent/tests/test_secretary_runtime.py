@@ -479,6 +479,76 @@ class SecretaryRuntimeTest(unittest.TestCase):
         self.assertEqual(google.updated_tasks[0]["id"], "task-1")
         self.assertIn("已替你調整 Google Tasks 提醒", self.messenger.pushes[0][1])
 
+    def test_ambiguous_task_update_requires_selection_then_updates_selected_item(self):
+        google = FakeGoogleClient(configured=True)
+        runtime = SecretaryRuntime(
+            settings=FakeSettings(),
+            store=self.store,
+            messenger=self.messenger,
+            agent_client=FakeAgentClient(
+                [
+                    PlannerResult(
+                        task_type="action_prep",
+                        task_action={"operation": "update_task", "due": "2026-03-12T15:00:00+08:00"},
+                        final_reply="已幫你調整提醒時間。",
+                    ),
+                    PlannerResult(
+                        task_type="action_prep",
+                        task_action={"operation": "update_task", "due": "2026-03-12T15:00:00+08:00"},
+                        final_reply="已幫你調整提醒時間。",
+                    ),
+                ]
+            ),
+            google_client=google,
+            browser_automation=FakeBrowserAutomation(),
+        )
+        self.store.upsert_connected_account(
+            "user:U123",
+            service_name="google",
+            login_identifier="user@example.com",
+            display_name="User",
+            oauth_provider="google",
+            session_available=True,
+            metadata={"access_token": "fake", "refresh_token": "fake"},
+        )
+        run_id, _ = self.store.create_task_run(
+            memory_key="user:U123",
+            user_goal="提醒我明天下午三點開會",
+            normalized_goal="提醒我明天下午三點開會",
+            source_payload={},
+            external_event_id="evt-prior",
+        )
+        self.store.add_artifact(
+            run_id,
+            kind="google_task",
+            ref_key="task-1",
+            content="開會",
+            metadata={"task_id": "task-1", "title": "開會", "due": "2026-03-09T15:00:00+08:00"},
+        )
+        self.store.add_artifact(
+            run_id,
+            kind="google_task",
+            ref_key="task-2",
+            content="開會",
+            metadata={"task_id": "task-2", "title": "開會", "due": "2026-03-10T15:00:00+08:00"},
+        )
+
+        runtime.handle_inbound_message(self.inbound("改到3/12", line_event_id="evt-update"))
+        runtime.process_next_run()
+
+        self.assertEqual(len(google.updated_tasks), 0)
+        self.assertIn("請直接回覆選項編號或完整事項名稱", self.messenger.pushes[0][1])
+        self.assertIn("1. 開會（2026-03-10 15:00:00）", self.messenger.pushes[0][1])
+        self.assertIn("2. 開會（2026-03-09 15:00:00）", self.messenger.pushes[0][1])
+
+        runtime.handle_inbound_message(self.inbound("2", line_event_id="evt-update-2"))
+        runtime.process_next_run()
+
+        self.assertEqual(len(google.updated_tasks), 1)
+        self.assertEqual(google.updated_tasks[0]["id"], "task-1")
+        self.assertIn("收到你的回覆，我繼續處理", self.messenger.replies[-1][1])
+        self.assertIn("已替你調整 Google Tasks 提醒", self.messenger.pushes[-1][1])
+
     def test_browser_request_is_deferred_for_next_phase(self):
         browser = FakeBrowserAutomation(store=self.store)
         runtime = SecretaryRuntime(

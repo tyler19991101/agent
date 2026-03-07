@@ -149,6 +149,7 @@
 - 如果使用者要求修改、延後、提前、取消剛建立的提醒或行程
   - 應優先使用執行上下文中的 `recent_service_artifacts` 來找出對應的 `task_id` 或 `event_id`。
   - 若能可靠判定，就輸出 `update_task`、`delete_task`、`update_event` 或 `cancel_event`。
+  - 若存在多個可能目標，必須設定 `requires_approval=true`、`approval_type="decision"`，並要求使用者先選擇要修改哪一個事項。
   - 若無法可靠判定，應改成追問，不可假裝已修改成功。
 - 如果使用者要求幫忙操作網站到結帳前
   - 這仍屬下一階段功能，請在 `final_reply` 與 `warnings` 中清楚說明目前尚未啟用，不要輸出任何假裝已經可執行的自動化結果。

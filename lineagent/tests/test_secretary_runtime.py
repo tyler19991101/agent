@@ -14,6 +14,7 @@ class FakeSettings:
     dify_base_url = "https://example.invalid/v1"
     dify_user_prefix = "line"
     worker_poll_seconds = 0.01
+    short_context_ttl_days = 14
 
 
 class FakeMessenger:
@@ -58,6 +59,14 @@ class FakeAgentClient:
         if not self.results:
             raise AssertionError("No fake planner result available")
         return self.results.pop(0)
+
+
+class RaisingAgentClient:
+    def __init__(self, error):
+        self.error = error
+
+    def plan(self, *, memory_key, user_goal, runtime_context):
+        raise self.error
 
 
 class SecretaryRuntimeTest(unittest.TestCase):
@@ -180,6 +189,62 @@ class SecretaryRuntimeTest(unittest.TestCase):
         chunks = split_text(text, 4300)
         self.assertEqual(len(chunks), 3)
         self.assertEqual(sum(len(chunk) for chunk in chunks), 9000)
+
+    def test_runtime_hides_internal_error_from_user(self):
+        runtime = SecretaryRuntime(
+            settings=FakeSettings(),
+            store=self.store,
+            messenger=self.messenger,
+            agent_client=RaisingAgentClient(RuntimeError("Dify HTTP error 400: sensitive details")),
+        )
+        runtime.handle_inbound_message(self.inbound("幫我查資料"))
+        runtime.process_next_run()
+        self.assertEqual(len(self.messenger.pushes), 1)
+        self.assertEqual(
+            self.messenger.pushes[0][1],
+            "目前系統發生異常，已通報 IT 人員協助處理，請稍後再試。",
+        )
+
+    def test_prune_short_context_keeps_profile_but_removes_old_history_and_stale_approval(self):
+        self.store.append_history("user:U123", "user", "近期訊息")
+        self.store.update_profile("user:U123", {"travel_style": "美食購物"})
+        run_id, _ = self.store.create_task_run(
+            memory_key="user:U123",
+            user_goal="舊任務",
+            normalized_goal="舊任務",
+            source_payload={},
+            external_event_id="evt-old",
+        )
+        approval_id = self.store.create_pending_approval(
+            run_id=run_id,
+            memory_key="user:U123",
+            approval_type="missing_info",
+            prompt_text="請補日期",
+        )
+        with self.store.connect() as conn:
+            conn.execute(
+                "UPDATE conversation_history SET created_at = datetime('now', '-20 days') WHERE memory_key = ?",
+                ("user:U123",),
+            )
+            conn.execute(
+                "UPDATE task_runs SET status = 'waiting_approval', current_phase = 'waiting_approval', created_at = datetime('now', '-20 days') WHERE id = ?",
+                (run_id,),
+            )
+            conn.execute(
+                "UPDATE pending_approvals SET created_at = datetime('now', '-20 days') WHERE id = ?",
+                (approval_id,),
+            )
+            conn.commit()
+
+        self.store.prune_short_context("user:U123", 14)
+
+        self.assertEqual(self.store.history_to_text("user:U123"), "")
+        self.assertEqual(self.store.get_profile("user:U123"), {"travel_style": "美食購物"})
+        pending = self.store.get_open_approval("user:U123")
+        self.assertIsNone(pending)
+        run = self.store.get_task_run(run_id)
+        self.assertEqual(run.status, "failed")
+        self.assertEqual(run.current_phase, "expired")
 
     def test_extract_sent_message_ids_handles_missing_response(self):
         self.assertEqual(extract_sent_message_ids(None), [])

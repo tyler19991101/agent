@@ -11,6 +11,7 @@ class Settings:
     dify_user_prefix: str
     database_path: str
     worker_poll_seconds: float
+    short_context_ttl_days: int
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -26,6 +27,7 @@ class Settings:
                 os.path.join(base_dir, "bot_memory.sqlite3"),
             ).strip(),
             worker_poll_seconds=float(os.getenv("WORKER_POLL_SECONDS", "1.5")),
+            short_context_ttl_days=int(os.getenv("SHORT_CONTEXT_TTL_DAYS", "7")),
         )
         missing = [
             name

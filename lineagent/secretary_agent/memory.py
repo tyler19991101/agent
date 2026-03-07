@@ -131,6 +131,83 @@ class SQLiteStore:
                 )
                 conn.commit()
 
+    def prune_short_context(self, memory_key: str, ttl_days: int) -> None:
+        if ttl_days <= 0:
+            return
+        with self.lock:
+            with self.connect() as conn:
+                conn.execute(
+                    """
+                    DELETE FROM conversation_history
+                    WHERE memory_key = ?
+                      AND created_at < datetime('now', ?)
+                    """,
+                    (memory_key, f"-{ttl_days} days"),
+                )
+                stale_run_rows = conn.execute(
+                    """
+                    SELECT id FROM task_runs
+                    WHERE memory_key = ?
+                      AND created_at < datetime('now', ?)
+                      AND status IN ('completed', 'failed')
+                    """,
+                    (memory_key, f"-{ttl_days} days"),
+                ).fetchall()
+                stale_run_ids = [int(row["id"]) for row in stale_run_rows]
+                for run_id in stale_run_ids:
+                    conn.execute("DELETE FROM task_steps WHERE run_id = ?", (run_id,))
+                    conn.execute("DELETE FROM artifacts WHERE run_id = ?", (run_id,))
+                    conn.execute("DELETE FROM pending_approvals WHERE run_id = ?", (run_id,))
+                if stale_run_ids:
+                    placeholders = ",".join("?" for _ in stale_run_ids)
+                    conn.execute(
+                        f"DELETE FROM task_runs WHERE id IN ({placeholders})",
+                        tuple(stale_run_ids),
+                    )
+
+                stale_pending_rows = conn.execute(
+                    """
+                    SELECT id, run_id FROM pending_approvals
+                    WHERE memory_key = ?
+                      AND status = 'pending'
+                      AND created_at < datetime('now', ?)
+                    """,
+                    (memory_key, f"-{ttl_days} days"),
+                ).fetchall()
+                stale_pending_run_ids = []
+                for row in stale_pending_rows:
+                    conn.execute(
+                        """
+                        UPDATE pending_approvals
+                        SET status = 'cancelled', resolved_at = CURRENT_TIMESTAMP
+                        WHERE id = ?
+                        """,
+                        (int(row["id"]),),
+                    )
+                    stale_pending_run_ids.append(int(row["run_id"]))
+                for run_id in stale_pending_run_ids:
+                    conn.execute(
+                        """
+                        UPDATE task_runs
+                        SET status = 'failed',
+                            current_phase = 'expired',
+                            error = 'Short-term context expired',
+                            finished_at = CURRENT_TIMESTAMP
+                        WHERE id = ?
+                          AND status = 'waiting_approval'
+                        """,
+                        (run_id,),
+                    )
+
+                conn.execute(
+                    """
+                    DELETE FROM bot_message_store
+                    WHERE created_at < datetime('now', ?)
+                    """,
+                    (f"-{ttl_days} days",),
+                )
+                conn.commit()
+
     def history_to_text(self, memory_key: str) -> str:
         with self.lock:
             with self.connect() as conn:

@@ -15,6 +15,8 @@ from secretary_agent.utils import (
 
 
 class SecretaryRuntime:
+    USER_SAFE_ERROR_TEXT = "目前系統發生異常，已通報 IT 人員協助處理，請稍後再試。"
+
     def __init__(
         self,
         *,
@@ -41,6 +43,7 @@ class SecretaryRuntime:
         self.worker.start()
 
     def handle_inbound_message(self, inbound: InboundMessage) -> None:
+        self.store.prune_short_context(inbound.memory_key, self.settings.short_context_ttl_days)
         text = inbound.text.strip()
         if not text:
             self._reply(inbound.reply_token, "請直接告訴我你要我協助的事情。", inbound.memory_key)
@@ -121,6 +124,7 @@ class SecretaryRuntime:
 
     def _process_run(self, run: TaskRun) -> None:
         try:
+            self.store.prune_short_context(run.memory_key, self.settings.short_context_ttl_days)
             context = self.store.build_runtime_context(run.id, run.memory_key)
             planning_goal = self._build_planning_goal(run.user_goal, context)
             self.store.add_step(
@@ -187,7 +191,6 @@ class SecretaryRuntime:
             self.store.store_bot_messages(message_ids, self.messenger.split_for_storage(final_text))
             self.store.append_history(run.memory_key, "assistant", final_text)
         except Exception as err:
-            error_text = f"處理任務時發生錯誤：{err}"
             self.store.add_step(
                 run.id,
                 step_type="plan",
@@ -203,8 +206,8 @@ class SecretaryRuntime:
                 finished=True,
             )
             push_target = self._memory_key_to_push_target(run.memory_key)
-            self.messenger.push_text(push_target, error_text)
-            self.store.append_history(run.memory_key, "assistant", error_text)
+            self.messenger.push_text(push_target, self.USER_SAFE_ERROR_TEXT)
+            self.store.append_history(run.memory_key, "assistant", self.USER_SAFE_ERROR_TEXT)
 
     def _build_planning_goal(self, user_goal: str, context: Dict[str, Any]) -> str:
         artifacts = context.get("artifacts", [])

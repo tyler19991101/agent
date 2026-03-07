@@ -36,11 +36,81 @@ class FakeGoogleClient:
         self.events = events or []
         self.tasks = tasks or []
         self.state_tokens = []
+        self.created_tasks = []
+        self.updated_tasks = []
+        self.completed_tasks = []
+        self.deleted_tasks = []
+        self.created_events = []
+        self.updated_events = []
+        self.deleted_events = []
 
     def new_state_token(self):
         token = "state-token"
         self.state_tokens.append(token)
         return token
+
+    def create_task(self, token_payload, task):
+        payload = {
+            "id": f"task-{len(self.created_tasks)+1}",
+            "title": task.get("title", ""),
+            "status": "needsAction",
+            "web_view_link": "https://tasks.example/task-1",
+            "due": task.get("due", ""),
+        }
+        self.created_tasks.append(payload)
+        return payload
+
+    def update_task(self, token_payload, *, task_id, task):
+        payload = {
+            "id": task_id,
+            "title": task.get("title", "開會"),
+            "status": "needsAction",
+            "web_view_link": "https://tasks.example/task-1",
+            "due": task.get("due", ""),
+        }
+        self.updated_tasks.append(payload)
+        return payload
+
+    def complete_task(self, token_payload, *, task_id):
+        payload = {"id": task_id, "title": "開會", "status": "completed"}
+        self.completed_tasks.append(payload)
+        return payload
+
+    def delete_task(self, token_payload, *, task_id):
+        payload = {"id": task_id, "status": "deleted"}
+        self.deleted_tasks.append(payload)
+        return payload
+
+    def list_tasks(self, token_payload, *, show_completed=False, max_results=10):
+        return {"items": list(self.tasks)[:max_results]}
+
+    def create_event(self, token_payload, event):
+        payload = {
+            "id": f"event-{len(self.created_events)+1}",
+            "summary": event.get("summary", ""),
+            "html_link": "https://calendar.example/event-1",
+            "status": "confirmed",
+        }
+        self.created_events.append(payload)
+        return payload
+
+    def update_event(self, token_payload, *, event_id, event):
+        payload = {
+            "id": event_id,
+            "summary": event.get("summary", "會議"),
+            "html_link": "https://calendar.example/event-1",
+            "status": "confirmed",
+        }
+        self.updated_events.append(payload)
+        return payload
+
+    def delete_event(self, token_payload, *, event_id):
+        payload = {"id": event_id, "status": "cancelled"}
+        self.deleted_events.append(payload)
+        return payload
+
+    def list_events(self, token_payload, *, time_min=None, time_max=None, max_results=10):
+        return {"items": list(self.events)[:max_results]}
 
 
 class FakeBrowserAutomation:
@@ -361,6 +431,53 @@ class SecretaryRuntimeTest(unittest.TestCase):
         self.assertIn("/auth/google/start?state=state-token", self.messenger.pushes[0][1])
         run = self.store.get_task_run(1)
         self.assertEqual(run.current_phase, "awaiting_google_auth")
+
+    def test_update_task_uses_recent_google_artifact(self):
+        google = FakeGoogleClient(configured=True)
+        runtime = SecretaryRuntime(
+            settings=FakeSettings(),
+            store=self.store,
+            messenger=self.messenger,
+            agent_client=FakeAgentClient(
+                [
+                    PlannerResult(
+                        task_type="action_prep",
+                        task_action={"operation": "update_task", "title": "開會", "due": "2026-03-12T15:00:00+08:00"},
+                        final_reply="已幫你調整提醒時間。",
+                    )
+                ]
+            ),
+            google_client=google,
+            browser_automation=FakeBrowserAutomation(),
+        )
+        self.store.upsert_connected_account(
+            "user:U123",
+            service_name="google",
+            login_identifier="user@example.com",
+            display_name="User",
+            oauth_provider="google",
+            session_available=True,
+            metadata={"access_token": "fake", "refresh_token": "fake"},
+        )
+        run_id, _ = self.store.create_task_run(
+            memory_key="user:U123",
+            user_goal="提醒我明天下午三點開會",
+            normalized_goal="提醒我明天下午三點開會",
+            source_payload={},
+            external_event_id="evt-prior",
+        )
+        self.store.add_artifact(
+            run_id,
+            kind="google_task",
+            ref_key="task-1",
+            content="開會",
+            metadata={"task_id": "task-1", "title": "開會", "web_view_link": "https://tasks.example/task-1"},
+        )
+        runtime.handle_inbound_message(self.inbound("改到3/12", line_event_id="evt-update"))
+        runtime.process_next_run()
+        self.assertEqual(len(google.updated_tasks), 1)
+        self.assertEqual(google.updated_tasks[0]["id"], "task-1")
+        self.assertIn("已替你調整 Google Tasks 提醒", self.messenger.pushes[0][1])
 
     def test_browser_request_is_deferred_for_next_phase(self):
         browser = FakeBrowserAutomation(store=self.store)

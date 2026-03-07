@@ -71,8 +71,8 @@ class DifyAgentClient:
             '  "profile_updates": {"key":"value"},\n'
             '  "account_updates": [{"service_name":"string","login_identifier":"string","display_name":"string","oauth_provider":"string","session_available":false}],\n'
             '  "memory_actions": ["save_profile | update_profile | forget_profile | save_account | forget_account"],\n'
-            '  "calendar_action": {"operation":"create_event | update_event | cancel_event | list_events","summary":"string","description":"string","start":"ISO-8601","end":"ISO-8601"},\n'
-            '  "task_action": {"operation":"create_task | complete_task | list_tasks | delete_task","title":"string","notes":"string","due":"ISO-8601","task_id":"string"},\n'
+            '  "calendar_action": {"operation":"create_event | update_event | cancel_event | list_events","event_id":"string","summary":"string","description":"string","start":"ISO-8601","end":"ISO-8601"},\n'
+            '  "task_action": {"operation":"create_task | update_task | complete_task | list_tasks | delete_task","title":"string","notes":"string","due":"ISO-8601","task_id":"string"},\n'
             '  "requested_outputs": ["txt | docx | pdf"],\n'
             '  "document_title": "string"\n'
             "}\n"
@@ -91,6 +91,7 @@ class DifyAgentClient:
             "8. document_title 要給出適合檔案命名的人類可讀標題。\n\n"
             "9. 若使用者使用相對日期，例如今天、明天、後天、下週一，必須以目前執行上下文中的 current_datetime_local 與 current_timezone 為唯一基準，不可自行猜測其他日期。\n"
             "10. 若使用者要求建立行程或提醒，calendar_action/task_action 中的日期時間必須與 relative date 解析結果一致。\n\n"
+            "11. 若使用者要求修改、延後、提前、取消剛剛建立的提醒或行程，請優先參考執行上下文中的 recent_service_artifacts，並在 task_action/calendar_action 中帶出對應的 task_id 或 event_id；若無法可靠判定，再改成追問。\n\n"
             f"使用者最新目標：{user_goal}\n"
             f"目前執行上下文：\n{context_json}"
         )

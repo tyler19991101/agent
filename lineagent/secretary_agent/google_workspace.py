@@ -101,6 +101,25 @@ class GoogleWorkspaceClient:
             "status": created.get("status", ""),
         }
 
+    def update_event(self, token_payload: Dict[str, Any], *, event_id: str, event: Dict[str, Any]) -> Dict[str, Any]:
+        service = build("calendar", "v3", credentials=self._credentials(token_payload), cache_discovery=False)
+        updated = (
+            service.events()
+            .patch(calendarId=self.settings.google_calendar_id, eventId=event_id, body=event)
+            .execute()
+        )
+        return {
+            "id": updated.get("id", ""),
+            "summary": updated.get("summary", ""),
+            "html_link": updated.get("htmlLink", ""),
+            "status": updated.get("status", ""),
+        }
+
+    def delete_event(self, token_payload: Dict[str, Any], *, event_id: str) -> Dict[str, Any]:
+        service = build("calendar", "v3", credentials=self._credentials(token_payload), cache_discovery=False)
+        service.events().delete(calendarId=self.settings.google_calendar_id, eventId=event_id).execute()
+        return {"id": event_id, "status": "cancelled"}
+
     def list_events(
         self,
         token_payload: Dict[str, Any],
@@ -139,6 +158,27 @@ class GoogleWorkspaceClient:
             "self_link": created.get("selfLink", ""),
             "web_view_link": created.get("webViewLink", ""),
         }
+
+    def update_task(self, token_payload: Dict[str, Any], *, task_id: str, task: Dict[str, Any]) -> Dict[str, Any]:
+        service = build("tasks", "v1", credentials=self._credentials(token_payload), cache_discovery=False)
+        updated = (
+            service.tasks()
+            .patch(tasklist=self.settings.google_tasklist_id, task=task_id, body=task)
+            .execute()
+        )
+        return {
+            "id": updated.get("id", ""),
+            "title": updated.get("title", ""),
+            "status": updated.get("status", ""),
+            "self_link": updated.get("selfLink", ""),
+            "web_view_link": updated.get("webViewLink", ""),
+            "due": updated.get("due", ""),
+        }
+
+    def delete_task(self, token_payload: Dict[str, Any], *, task_id: str) -> Dict[str, Any]:
+        service = build("tasks", "v1", credentials=self._credentials(token_payload), cache_discovery=False)
+        service.tasks().delete(tasklist=self.settings.google_tasklist_id, task=task_id).execute()
+        return {"id": task_id, "status": "deleted"}
 
     def list_tasks(self, token_payload: Dict[str, Any], *, show_completed: bool = False, max_results: int = 10) -> Dict[str, Any]:
         service = build("tasks", "v1", credentials=self._credentials(token_payload), cache_discovery=False)

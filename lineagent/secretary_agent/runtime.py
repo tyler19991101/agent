@@ -58,6 +58,8 @@ class SecretaryRuntime:
         self.stop_event = Event()
         self.worker: Optional[Thread] = None
         self.logger = logging.getLogger("lineagent.runtime")
+        self._active_run_id_for_service_artifacts = 0
+        self.current_memory_key_for_resolution = ""
 
     def start(self) -> None:
         if self.worker and self.worker.is_alive():
@@ -292,9 +294,13 @@ class SecretaryRuntime:
             if google_result.get("status") == "awaiting_google_auth":
                 return
             if google_result.get("final_reply"):
-                plan.final_reply = self._merge_text(plan.final_reply, str(google_result["final_reply"]))
-            if google_result.get("action_links"):
-                plan.action_links.extend(google_result["action_links"])
+                if google_result.get("authoritative"):
+                    plan.final_reply = str(google_result["final_reply"])
+                    plan.action_links = list(google_result.get("action_links", []) or [])
+                else:
+                    plan.final_reply = self._merge_text(plan.final_reply, str(google_result["final_reply"]))
+                    if google_result.get("action_links"):
+                        plan.action_links.extend(google_result["action_links"])
 
             browser_result = self._handle_browser_request(run, plan)
             if browser_result.get("status") == "awaiting_sensitive_confirmation":
@@ -661,41 +667,44 @@ class SecretaryRuntime:
         action = plan.calendar_action or plan.task_action
         if not action:
             return {}
-        if not self.google_client.is_configured:
-            return {
-                "final_reply": "目前尚未完成 Google 整合設定，因此暫時不能替你建立行程或提醒。",
-            }
-
-        account = self.store.get_primary_connected_account(run.memory_key, "google")
-        if not account:
-            state_token = self.google_client.new_state_token()
-            self.store.create_oauth_state(
-                state_token=state_token,
-                memory_key=run.memory_key,
-                provider="google",
-                run_id=run.id,
-                metadata={"goal": run.user_goal},
-            )
-            auth_url = f"{self.settings.public_base_url}/auth/google/start?state={state_token}"
-            prompt = (
-                "要替你建立 Google 行程/提醒，請先完成 Google 授權：\n"
-                f"{auth_url}\n"
-                "授權完成後，我會自動繼續處理。"
-            )
-            self.store.update_run_status(
-                run.id,
-                status="waiting_approval",
-                current_phase="awaiting_google_auth",
-                requires_approval=True,
-            )
-            push_target = self._memory_key_to_push_target(run.memory_key)
-            message_ids = self.messenger.push_text(push_target, prompt)
-            self.store.store_bot_messages(message_ids, self.messenger.split_for_storage(prompt))
-            self.store.append_history(run.memory_key, "assistant", prompt)
-            return {"status": "awaiting_google_auth"}
-
-        token_payload = self._account_token_payload(account)
         try:
+            self._active_run_id_for_service_artifacts = run.id
+            self.current_memory_key_for_resolution = run.memory_key
+            if not self.google_client.is_configured:
+                return {
+                    "final_reply": "目前尚未完成 Google 整合設定，因此暫時不能替你建立行程或提醒。",
+                    "authoritative": True,
+                }
+
+            account = self.store.get_primary_connected_account(run.memory_key, "google")
+            if not account:
+                state_token = self.google_client.new_state_token()
+                self.store.create_oauth_state(
+                    state_token=state_token,
+                    memory_key=run.memory_key,
+                    provider="google",
+                    run_id=run.id,
+                    metadata={"goal": run.user_goal},
+                )
+                auth_url = f"{self.settings.public_base_url}/auth/google/start?state={state_token}"
+                prompt = (
+                    "要替你建立 Google 行程/提醒，請先完成 Google 授權：\n"
+                    f"{auth_url}\n"
+                    "授權完成後，我會自動繼續處理。"
+                )
+                self.store.update_run_status(
+                    run.id,
+                    status="waiting_approval",
+                    current_phase="awaiting_google_auth",
+                    requires_approval=True,
+                )
+                push_target = self._memory_key_to_push_target(run.memory_key)
+                message_ids = self.messenger.push_text(push_target, prompt)
+                self.store.store_bot_messages(message_ids, self.messenger.split_for_storage(prompt))
+                self.store.append_history(run.memory_key, "assistant", prompt)
+                return {"status": "awaiting_google_auth"}
+
+            token_payload = self._account_token_payload(account)
             if plan.calendar_action:
                 result = self._execute_calendar_action(token_payload, plan.calendar_action)
                 self.store.upsert_connected_account(
@@ -710,6 +719,7 @@ class SecretaryRuntime:
                 return {
                     "final_reply": result["message"],
                     "action_links": result.get("action_links", []),
+                    "authoritative": True,
                 }
             if plan.task_action:
                 result = self._execute_task_action(token_payload, plan.task_action)
@@ -725,6 +735,7 @@ class SecretaryRuntime:
                 return {
                     "final_reply": result["message"],
                     "action_links": result.get("action_links", []),
+                    "authoritative": True,
                 }
         except GoogleWorkspaceError as err:
             self.logger.exception(
@@ -737,11 +748,16 @@ class SecretaryRuntime:
             )
             return {
                 "final_reply": "Google 行程/提醒處理失敗，已記錄錯誤並請你稍後再試。",
+                "authoritative": True,
             }
+        finally:
+            self._active_run_id_for_service_artifacts = 0
+            self.current_memory_key_for_resolution = ""
         return {}
 
     def _execute_calendar_action(self, token_payload: Dict[str, Any], action: Dict[str, Any]) -> Dict[str, Any]:
         operation = str(action.get("operation", "")).strip()
+        event_id = str(action.get("event_id", "")).strip() or self._resolve_recent_service_id("google_event", action)
         if operation == "create_event":
             event = {
                 "summary": str(action.get("summary", "")).strip() or "LINE 助理建立的行程",
@@ -753,10 +769,70 @@ class SecretaryRuntime:
             event["start"]["timeZone"] = timezone_name
             event["end"]["timeZone"] = timezone_name
             created = self.google_client.create_event(token_payload, event)
+            self._store_service_artifact(
+                run_kind="google_event",
+                ref_key=created["id"],
+                title=created["summary"],
+                metadata={
+                    "event_id": created["id"],
+                    "summary": created["summary"],
+                    "html_link": created.get("html_link", ""),
+                    "status": created.get("status", ""),
+                    "start": event["start"]["dateTime"],
+                    "end": event["end"]["dateTime"],
+                },
+            )
             return {
                 "message": f"已替你建立 Google 行程：{created['summary']}",
                 "action_links": ([{"label": "開啟 Google Calendar", "url": created["html_link"]}] if created.get("html_link") else []),
             }
+        if operation == "update_event":
+            if not event_id:
+                raise GoogleWorkspaceError("Missing event_id for update_event")
+            patch_body: Dict[str, Any] = {}
+            if str(action.get("summary", "")).strip():
+                patch_body["summary"] = str(action.get("summary", "")).strip()
+            if "description" in action:
+                patch_body["description"] = str(action.get("description", "")).strip()
+            if str(action.get("start", "")).strip():
+                patch_body["start"] = {
+                    "dateTime": str(action.get("start", "")).strip(),
+                    "timeZone": str(action.get("timezone", "Asia/Taipei")).strip() or "Asia/Taipei",
+                }
+            if str(action.get("end", "")).strip():
+                patch_body["end"] = {
+                    "dateTime": str(action.get("end", "")).strip(),
+                    "timeZone": str(action.get("timezone", "Asia/Taipei")).strip() or "Asia/Taipei",
+                }
+            updated = self.google_client.update_event(token_payload, event_id=event_id, event=patch_body)
+            self._store_service_artifact(
+                run_kind="google_event",
+                ref_key=updated["id"],
+                title=updated["summary"],
+                metadata={
+                    "event_id": updated["id"],
+                    "summary": updated["summary"],
+                    "html_link": updated.get("html_link", ""),
+                    "status": updated.get("status", ""),
+                    "start": patch_body.get("start", {}).get("dateTime", ""),
+                    "end": patch_body.get("end", {}).get("dateTime", ""),
+                },
+            )
+            return {
+                "message": f"已替你調整 Google 行程：{updated['summary']}",
+                "action_links": ([{"label": "開啟 Google Calendar", "url": updated["html_link"]}] if updated.get("html_link") else []),
+            }
+        if operation in {"cancel_event", "delete_event"}:
+            if not event_id:
+                raise GoogleWorkspaceError("Missing event_id for cancel_event")
+            deleted = self.google_client.delete_event(token_payload, event_id=event_id)
+            self._store_service_artifact(
+                run_kind="google_event",
+                ref_key=deleted["id"],
+                title="cancelled",
+                metadata={"event_id": deleted["id"], "status": deleted["status"]},
+            )
+            return {"message": "已替你取消 Google 行程。"}
         if operation == "list_events":
             now = datetime.now(timezone.utc)
             time_min = str(action.get("time_min", "")).strip() or now.isoformat()
@@ -774,6 +850,7 @@ class SecretaryRuntime:
 
     def _execute_task_action(self, token_payload: Dict[str, Any], action: Dict[str, Any]) -> Dict[str, Any]:
         operation = str(action.get("operation", "")).strip()
+        task_id = str(action.get("task_id", "")).strip() or self._resolve_recent_service_id("google_task", action)
         if operation == "create_task":
             task = {
                 "title": str(action.get("title", "")).strip() or "LINE 助理建立的提醒",
@@ -783,9 +860,48 @@ class SecretaryRuntime:
             if due:
                 task["due"] = due
             created = self.google_client.create_task(token_payload, task)
+            self._store_service_artifact(
+                run_kind="google_task",
+                ref_key=created["id"],
+                title=created["title"],
+                metadata={
+                    "task_id": created["id"],
+                    "title": created["title"],
+                    "status": created.get("status", ""),
+                    "web_view_link": created.get("web_view_link", ""),
+                    "due": due,
+                },
+            )
             return {
                 "message": f"已替你建立 Google Tasks 提醒：{created['title']}",
                 "action_links": ([{"label": "查看 Google Tasks", "url": created.get("web_view_link", "")}] if created.get("web_view_link") else []),
+            }
+        if operation == "update_task":
+            if not task_id:
+                raise GoogleWorkspaceError("Missing task_id for update_task")
+            patch_body: Dict[str, Any] = {}
+            if str(action.get("title", "")).strip():
+                patch_body["title"] = str(action.get("title", "")).strip()
+            if "notes" in action:
+                patch_body["notes"] = str(action.get("notes", "")).strip()
+            if "due" in action and str(action.get("due", "")).strip():
+                patch_body["due"] = str(action.get("due", "")).strip()
+            updated = self.google_client.update_task(token_payload, task_id=task_id, task=patch_body)
+            self._store_service_artifact(
+                run_kind="google_task",
+                ref_key=updated["id"],
+                title=updated["title"],
+                metadata={
+                    "task_id": updated["id"],
+                    "title": updated["title"],
+                    "status": updated.get("status", ""),
+                    "web_view_link": updated.get("web_view_link", ""),
+                    "due": patch_body.get("due", updated.get("due", "")),
+                },
+            )
+            return {
+                "message": f"已替你調整 Google Tasks 提醒：{updated['title']}",
+                "action_links": ([{"label": "查看 Google Tasks", "url": updated.get("web_view_link", "")}] if updated.get("web_view_link") else []),
             }
         if operation == "list_tasks":
             listed = self.google_client.list_tasks(token_payload)
@@ -797,12 +913,56 @@ class SecretaryRuntime:
                 lines.append(f"- {item.get('title', '未命名待辦')}")
             return {"message": "\n".join(lines)}
         if operation == "complete_task":
-            task_id = str(action.get("task_id", "")).strip()
             if not task_id:
                 raise GoogleWorkspaceError("Missing task_id for complete_task")
             updated = self.google_client.complete_task(token_payload, task_id=task_id)
+            self._store_service_artifact(
+                run_kind="google_task",
+                ref_key=updated["id"],
+                title=updated["title"],
+                metadata={"task_id": updated["id"], "title": updated["title"], "status": updated["status"]},
+            )
             return {"message": f"已替你完成待辦：{updated['title']}"}
+        if operation == "delete_task":
+            if not task_id:
+                raise GoogleWorkspaceError("Missing task_id for delete_task")
+            deleted = self.google_client.delete_task(token_payload, task_id=task_id)
+            self._store_service_artifact(
+                run_kind="google_task",
+                ref_key=deleted["id"],
+                title="deleted",
+                metadata={"task_id": deleted["id"], "status": deleted["status"]},
+            )
+            return {"message": "已替你刪除 Google Tasks 提醒。"}
         raise GoogleWorkspaceError(f"Unsupported task operation: {operation}")
+
+    def _resolve_recent_service_id(self, kind: str, action: Dict[str, Any]) -> str:
+        summary = str(action.get("summary", "")).strip()
+        title = str(action.get("title", "")).strip()
+        target_name = summary or title
+        recent = self.store.get_recent_memory_artifacts(self.current_memory_key_for_resolution, kinds=[kind], limit=5)
+        for row in recent:
+            try:
+                metadata = json.loads(row["metadata_json"] or "{}")
+            except json.JSONDecodeError:
+                metadata = {}
+            candidate_name = str(metadata.get("summary") or metadata.get("title") or row["content"] or "").strip()
+            if target_name and candidate_name and candidate_name != target_name:
+                continue
+            return str(metadata.get("event_id") or metadata.get("task_id") or row["ref_key"] or "")
+        return ""
+
+    def _store_service_artifact(self, *, run_kind: str, ref_key: str, title: str, metadata: Dict[str, Any]) -> None:
+        run_id = getattr(self, "_active_run_id_for_service_artifacts", 0)
+        if not run_id:
+            return
+        self.store.add_artifact(
+            run_id,
+            kind=run_kind,
+            ref_key=ref_key,
+            content=title or ref_key,
+            metadata=metadata,
+        )
 
     def _handle_browser_request(self, run: TaskRun, plan: PlannerResult) -> Dict[str, Any]:
         if not plan.browser_request:

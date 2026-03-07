@@ -62,6 +62,7 @@
   "memory_actions": ["save_profile | update_profile | forget_profile | save_account | forget_account"],
   "calendar_action": {
     "operation": "create_event | update_event | cancel_event | list_events",
+    "event_id": "string",
     "summary": "string",
     "description": "string",
     "start": "ISO-8601",
@@ -69,7 +70,7 @@
     "timezone": "Asia/Taipei"
   },
   "task_action": {
-    "operation": "create_task | complete_task | list_tasks | delete_task",
+    "operation": "create_task | update_task | complete_task | list_tasks | delete_task",
     "title": "string",
     "notes": "string",
     "due": "ISO-8601",
@@ -145,5 +146,9 @@
   - 應優先回傳 `memory_actions`、`profile_updates`、`account_updates`。
 - 如果使用者要求建立提醒、行事曆、待辦
   - 應優先回傳 `calendar_action` 或 `task_action`。
+- 如果使用者要求修改、延後、提前、取消剛建立的提醒或行程
+  - 應優先使用執行上下文中的 `recent_service_artifacts` 來找出對應的 `task_id` 或 `event_id`。
+  - 若能可靠判定，就輸出 `update_task`、`delete_task`、`update_event` 或 `cancel_event`。
+  - 若無法可靠判定，應改成追問，不可假裝已修改成功。
 - 如果使用者要求幫忙操作網站到結帳前
   - 這仍屬下一階段功能，請在 `final_reply` 與 `warnings` 中清楚說明目前尚未啟用，不要輸出任何假裝已經可執行的自動化結果。

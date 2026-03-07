@@ -771,6 +771,30 @@ class SQLiteStore:
                     (ref_key,),
                 ).fetchone()
 
+    def get_recent_memory_artifacts(
+        self,
+        memory_key: str,
+        *,
+        kinds: Optional[List[str]] = None,
+        limit: int = 10,
+    ) -> List[sqlite3.Row]:
+        query = """
+            SELECT a.*
+            FROM artifacts a
+            JOIN task_runs r ON r.id = a.run_id
+            WHERE r.memory_key = ?
+        """
+        params: List[Any] = [memory_key]
+        if kinds:
+            placeholders = ",".join("?" for _ in kinds)
+            query += f" AND a.kind IN ({placeholders})"
+            params.extend(kinds)
+        query += " ORDER BY a.id DESC LIMIT ?"
+        params.append(limit)
+        with self.lock:
+            with self.connect() as conn:
+                return conn.execute(query, tuple(params)).fetchall()
+
     def create_pending_approval(
         self,
         *,
@@ -902,10 +926,29 @@ class SQLiteStore:
             }
             for row in self.get_artifacts(run_id)
         ]
+        recent_service_artifacts = []
+        for row in self.get_recent_memory_artifacts(
+            memory_key,
+            kinds=["google_task", "google_event"],
+            limit=5,
+        ):
+            try:
+                metadata = json.loads(row["metadata_json"] or "{}")
+            except json.JSONDecodeError:
+                metadata = {}
+            recent_service_artifacts.append(
+                {
+                    "kind": row["kind"],
+                    "ref_key": row["ref_key"],
+                    "content": row["content"],
+                    "metadata": metadata,
+                }
+            )
         return {
             "history": self.history_to_text(memory_key),
             "profile": self.get_profile(memory_key),
             "connected_accounts": accounts,
             "artifacts": artifacts,
+            "recent_service_artifacts": recent_service_artifacts,
             "latest_approval_response": approval["response_text"] if approval else "",
         }

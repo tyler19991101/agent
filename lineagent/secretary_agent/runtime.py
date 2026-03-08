@@ -118,6 +118,48 @@ class SecretaryRuntime:
         pending = self.store.get_open_approval(inbound.memory_key)
         quoted_text = self.store.get_bot_message_content(inbound.quoted_message_id)
         if pending and self._should_resume_pending(pending, inbound, quoted_text):
+            pending_run = self.store.get_task_run(int(pending["run_id"]))
+            if pending_run.current_phase == "awaiting_google_auth" and self._looks_like_google_auth_decline(text):
+                self.store.resolve_approval(int(pending["id"]), text)
+                self.store.update_run_status(
+                    pending_run.id,
+                    status="failed",
+                    current_phase="google_auth_declined",
+                    error="User declined Google auth",
+                    finished=True,
+                )
+                rewritten_goal = (
+                    f"{pending_run.user_goal}\n"
+                    "補充要求：不要建立 Google Calendar 或 Google Tasks，也不要要求 Google 授權，只提供純文字規劃結果。"
+                )
+                new_run_id, created = self.store.create_task_run(
+                    memory_key=inbound.memory_key,
+                    user_goal=rewritten_goal,
+                    normalized_goal=rewritten_goal,
+                    source_payload={
+                        "source_type": inbound.source_type,
+                        "source_id": inbound.source_id,
+                        "user_id": inbound.user_id,
+                        "quoted_message_id": inbound.quoted_message_id,
+                        "quoted_text": quoted_text,
+                        "received_at": inbound.received_at.isoformat(),
+                        "supersedes_run_id": pending_run.id,
+                    },
+                    external_event_id=inbound.line_event_id,
+                )
+                self.logger.info(
+                    format_log_event(
+                        "google_auth_declined_replanned",
+                        old_run_id=pending_run.id,
+                        new_run_id=new_run_id,
+                        created=created,
+                        memory_key=inbound.memory_key,
+                        source_id=inbound.source_id,
+                        user_id=inbound.user_id,
+                    )
+                )
+                self._respond_immediate(inbound, "收到，我不會建立 Google 行事曆或提醒，改成只提供文字規劃。")
+                return
             approval_metadata = {"quoted_message_id": inbound.quoted_message_id or ""}
             selected_option = self._match_pending_approval_option(pending, text)
             if self._approval_requires_option_selection(pending) and not selected_option:
@@ -446,6 +488,8 @@ class SecretaryRuntime:
         asks_tasks = any(token in normalized for token in ("提醒", "待辦", "待办", "task", "任務"))
         if not is_query:
             return
+        if self._looks_like_travel_itinerary_request(normalized):
+            return
         if asks_calendar:
             plan.calendar_action = self._build_calendar_query_action(user_goal)
             plan.task_action = {}
@@ -609,6 +653,11 @@ class SecretaryRuntime:
         if lower in APPROVAL_KEYWORDS or lower in REJECTION_KEYWORDS:
             return True
         return looks_like_short_followup(inbound.text) and bool(quoted_text or pending)
+
+    def _looks_like_google_auth_decline(self, text: str) -> bool:
+        normalized = "".join(text.strip().lower().split())
+        decline_tokens = ("不用", "不要", "先不要", "不需要", "只要文字", "文字稿", "純文字", "不用進入行事曆", "不要行事曆")
+        return any(token in normalized for token in decline_tokens)
 
     def _build_approval_prompt(self, plan: PlannerResult) -> str:
         lines: List[str] = []
@@ -785,6 +834,16 @@ class SecretaryRuntime:
         action = plan.calendar_action or plan.task_action
         if not action:
             return {}
+        if not self._should_allow_google_workspace_action(run.user_goal, plan):
+            self.logger.info(
+                format_log_event(
+                    "google_workspace_action_skipped",
+                    run_id=run.id,
+                    memory_key=run.memory_key,
+                    task_type=plan.task_type,
+                )
+            )
+            return {}
         try:
             self._active_run_id_for_service_artifacts = run.id
             self.current_memory_key_for_resolution = run.memory_key
@@ -876,6 +935,53 @@ class SecretaryRuntime:
             self._active_run_id_for_service_artifacts = 0
             self.current_memory_key_for_resolution = ""
         return {}
+
+    def _should_allow_google_workspace_action(self, user_goal: str, plan: PlannerResult) -> bool:
+        operation = str((plan.calendar_action or plan.task_action).get("operation", "")).strip()
+        if operation in {"list_events", "list_tasks", "update_event", "cancel_event", "update_task", "complete_task", "delete_task"}:
+            return True
+        normalized = "".join(user_goal.strip().lower().split())
+        explicit_google_schedule_tokens = (
+            "googlecalendar",
+            "google行事曆",
+            "google日曆",
+            "googletasks",
+            "提醒我",
+            "加入行事曆",
+            "加到行事曆",
+            "建立提醒",
+            "建立行事曆",
+            "排進行事曆",
+            "放進行事曆",
+            "calendar",
+            "tasks",
+        )
+        has_explicit_google_schedule = any(token in normalized for token in explicit_google_schedule_tokens)
+        if plan.task_type == "trip_planning" or self._looks_like_travel_itinerary_request(normalized):
+            return has_explicit_google_schedule
+        return True
+
+    def _looks_like_travel_itinerary_request(self, normalized_text: str) -> bool:
+        travel_tokens = (
+            "旅遊",
+            "自由行",
+            "飯店",
+            "住宿",
+            "機票",
+            "城市",
+            "景點",
+            "行程規劃",
+            "日本",
+            "名古屋",
+            "東京",
+            "大阪",
+            "京都",
+            "預估經費",
+            "預算",
+            "6天5夜",
+            "天夜",
+        )
+        return any(token in normalized_text for token in travel_tokens)
 
     def _execute_calendar_action(self, run: TaskRun, token_payload: Dict[str, Any], action: Dict[str, Any]) -> Dict[str, Any]:
         operation = str(action.get("operation", "")).strip()

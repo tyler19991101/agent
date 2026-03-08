@@ -696,6 +696,70 @@ class SecretaryRuntimeTest(unittest.TestCase):
         self.assertEqual(start.hour, 0)
         self.assertEqual(end - start, timedelta(days=5))
 
+    def test_trip_planning_does_not_trigger_google_auth_for_itinerary_text_request(self):
+        runtime = SecretaryRuntime(
+            settings=FakeSettings(),
+            store=self.store,
+            messenger=self.messenger,
+            agent_client=FakeAgentClient(
+                [
+                    PlannerResult(
+                        task_type="trip_planning",
+                        final_reply="這是 6 天 5 夜的日本名古屋行程建議。",
+                        calendar_action={
+                            "operation": "create_event",
+                            "summary": "日本名古屋行程",
+                            "start": "2026-09-28T09:00:00+08:00",
+                            "end": "2026-09-28T18:00:00+08:00",
+                        },
+                    )
+                ]
+            ),
+            google_client=FakeGoogleClient(configured=True),
+            browser_automation=FakeBrowserAutomation(),
+        )
+        runtime.handle_inbound_message(self.inbound("安排9/28-10/11之間，日本最佳行程，地點名古屋及附近城市，住飯店，列出6天5夜行程，並預估所有經費"))
+        runtime.process_next_run()
+        self.assertNotIn("Google 授權", self.messenger.pushes[0][1])
+        self.assertIn("名古屋行程建議", self.messenger.pushes[0][1])
+
+    def test_declining_google_auth_replans_as_text_only(self):
+        runtime = SecretaryRuntime(
+            settings=FakeSettings(),
+            store=self.store,
+            messenger=self.messenger,
+            agent_client=FakeAgentClient(
+                [PlannerResult(task_type="trip_planning", final_reply="改成純文字行程規劃。")]
+            ),
+            google_client=FakeGoogleClient(configured=True),
+            browser_automation=FakeBrowserAutomation(),
+        )
+        run_id, _ = self.store.create_task_run(
+            memory_key="user:U123",
+            user_goal="安排9/28-10/11之間，日本最佳行程",
+            normalized_goal="安排9/28-10/11之間，日本最佳行程",
+            source_payload={},
+            external_event_id="evt-prior-google",
+        )
+        approval_id = self.store.create_pending_approval(
+            run_id=run_id,
+            memory_key="user:U123",
+            approval_type="decision",
+            prompt_text="要替你建立 Google 行程/提醒，請先完成 Google 授權：...",
+            options=[],
+        )
+        self.store.update_run_status(
+            run_id,
+            status="waiting_approval",
+            current_phase="awaiting_google_auth",
+            requires_approval=True,
+        )
+        self.store.set_approval_prompt_message(approval_id, "push-google-auth")
+        runtime.handle_inbound_message(self.inbound("先不用進入行事曆，只要給我文字稿", quoted_message_id="push-google-auth", line_event_id="evt-text-only"))
+        self.assertIn("改成只提供文字規劃", self.messenger.replies[0][1])
+        runtime.process_next_run()
+        self.assertIn("純文字行程規劃", self.messenger.pushes[0][1])
+
     def test_split_text_chunks_long_messages(self):
         text = "a" * 9000
         chunks = split_text(text, 4300)

@@ -147,6 +147,14 @@ class FakeBrowserAutomation:
         }
 
 
+class FakeAdminNotifier:
+    def __init__(self):
+        self.calls = []
+
+    def notify_system_error(self, *, event, summary, fields=None):
+        self.calls.append({"event": event, "summary": summary, "fields": fields or {}})
+
+
 class FakeMessenger:
     def __init__(self):
         self.replies = []
@@ -409,6 +417,25 @@ class SecretaryRuntimeTest(unittest.TestCase):
         profile = self.store.get_profile("user:U123")
         self.assertEqual(profile.get("contact_email"), "user@example.com")
         self.assertIn("已記住你的常用 email", self.messenger.replies[0][1])
+
+    def test_runtime_notifies_admin_on_task_failure(self):
+        notifier = FakeAdminNotifier()
+        runtime = SecretaryRuntime(
+            settings=FakeSettings(),
+            store=self.store,
+            messenger=self.messenger,
+            agent_client=RaisingAgentClient(RuntimeError("planner exploded")),
+            google_client=FakeGoogleClient(),
+            browser_automation=FakeBrowserAutomation(),
+            admin_notifier=notifier,
+        )
+
+        runtime.handle_inbound_message(self.inbound("幫我查今天行程"))
+        runtime.process_next_run()
+
+        self.assertEqual(len(notifier.calls), 1)
+        self.assertEqual(notifier.calls[0]["event"], "task_failed")
+        self.assertEqual(notifier.calls[0]["fields"]["error_type"], "RuntimeError")
 
     def test_google_action_requests_oauth_when_account_not_connected(self):
         runtime = SecretaryRuntime(

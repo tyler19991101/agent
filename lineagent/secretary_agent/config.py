@@ -29,6 +29,7 @@ class Settings:
     google_calendar_id: str
     google_tasklist_id: str
     browser_automation_enabled: bool
+    admin_alert_line_user_id: str
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -69,6 +70,7 @@ class Settings:
             google_tasklist_id=os.getenv("GOOGLE_TASKLIST_ID", "@default").strip(),
             browser_automation_enabled=os.getenv("BROWSER_AUTOMATION_ENABLED", "0").strip().lower()
             in {"1", "true", "yes", "on"},
+            admin_alert_line_user_id=os.getenv("ADMIN_ALERT_LINE_USER_ID", "").strip(),
         )
         missing = [
             name

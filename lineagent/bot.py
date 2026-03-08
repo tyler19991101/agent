@@ -14,6 +14,7 @@ from linebot.v3.webhooks import (
 )
 
 from secretary_agent.audio_transcriber import AssemblyAIAudioTranscriber, AudioTranscriptionError
+from secretary_agent.admin_notifier import AdminNotifier
 from secretary_agent.config import Settings
 from secretary_agent.memory import SQLiteStore
 from secretary_agent.logging_utils import format_log_event
@@ -47,7 +48,17 @@ USER_SAFE_SYSTEM_ERROR_TEXT = "系統有錯誤，已通知 IT 處理，請稍後
 settings = Settings.from_env()
 store = SQLiteStore(settings.database_path)
 messenger = LineMessenger(settings.line_channel_access_token, store)
-runtime = SecretaryRuntime(settings=settings, store=store, messenger=messenger)
+admin_notifier = AdminNotifier(
+    messenger=messenger,
+    admin_line_user_id=settings.admin_alert_line_user_id,
+    logger=logging.getLogger("lineagent.alerts"),
+)
+runtime = SecretaryRuntime(
+    settings=settings,
+    store=store,
+    messenger=messenger,
+    admin_notifier=admin_notifier,
+)
 try:
     audio_transcriber = (
         AssemblyAIAudioTranscriber.from_settings(settings)
@@ -72,6 +83,11 @@ def callback():
         abort(400)
     except Exception:
         logger.exception(format_log_event("callback_unhandled_exception"))
+        admin_notifier.notify_system_error(
+            event="callback_unhandled_exception",
+            summary="LINE webhook callback 未處理例外",
+            fields={"error_type": "UnhandledException"},
+        )
         abort(500)
     return "OK"
 
@@ -145,6 +161,15 @@ def google_auth_callback():
         )
     except Exception as err:
         logger.exception(format_log_event("google_auth_callback_failed", error_type=type(err).__name__))
+        admin_notifier.notify_system_error(
+            event="google_auth_callback_failed",
+            summary="Google OAuth callback 失敗",
+            fields={
+                "memory_key": row["memory_key"],
+                "run_id": row.get("run_id"),
+                "error_type": type(err).__name__,
+            },
+        )
         messenger.push_text(
             runtime._memory_key_to_push_target(row["memory_key"]),
             USER_SAFE_SYSTEM_ERROR_TEXT,
@@ -255,6 +280,11 @@ def _start_media_processing(event: MessageEvent):
                 user_id=user_id,
             )
         )
+        admin_notifier.notify_system_error(
+            event="media_transcriber_missing",
+            summary="語音轉錄服務未啟用",
+            fields={"message_id": message_id, "source_id": source_id, "user_id": user_id},
+        )
         messenger.reply_text(event.reply_token, USER_SAFE_SYSTEM_ERROR_TEXT)
         return
     logger.info(
@@ -295,6 +325,11 @@ def _handle_media_message(event: MessageEvent):
                 source_id=source_id,
                 user_id=user_id,
             )
+        )
+        admin_notifier.notify_system_error(
+            event="media_transcriber_missing_runtime",
+            summary="語音轉錄服務執行時未啟用",
+            fields={"message_id": message_id, "source_id": source_id, "user_id": user_id},
         )
         messenger.push_text(push_target_id, USER_SAFE_SYSTEM_ERROR_TEXT)
         return
@@ -364,6 +399,16 @@ def _handle_media_message(event: MessageEvent):
                 error_type=type(err).__name__,
             )
         )
+        admin_notifier.notify_system_error(
+            event="media_transcription_failed",
+            summary="語音轉錄失敗",
+            fields={
+                "message_id": message_id,
+                "source_id": source_id,
+                "user_id": user_id,
+                "error_type": type(err).__name__,
+            },
+        )
         messenger.push_text(push_target_id, USER_SAFE_SYSTEM_ERROR_TEXT)
         return
     except Exception as err:
@@ -376,6 +421,16 @@ def _handle_media_message(event: MessageEvent):
                 error_type=type(err).__name__,
             )
         )
+        admin_notifier.notify_system_error(
+            event="media_processing_failed",
+            summary="語音訊息處理失敗",
+            fields={
+                "message_id": message_id,
+                "source_id": source_id,
+                "user_id": user_id,
+                "error_type": type(err).__name__,
+            },
+        )
         messenger.push_text(push_target_id, USER_SAFE_SYSTEM_ERROR_TEXT)
         return
 
@@ -387,6 +442,11 @@ def _handle_media_message(event: MessageEvent):
                 source_id=source_id,
                 user_id=user_id,
             )
+        )
+        admin_notifier.notify_system_error(
+            event="media_transcription_empty",
+            summary="語音轉錄結果為空",
+            fields={"message_id": message_id, "source_id": source_id, "user_id": user_id},
         )
         messenger.push_text(push_target_id, USER_SAFE_SYSTEM_ERROR_TEXT)
         return

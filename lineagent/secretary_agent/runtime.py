@@ -6,6 +6,7 @@ from threading import Event, Thread
 from typing import Any, Dict, List, Optional, Tuple
 
 from secretary_agent.browser_automation import BrowserAutomationManager
+from secretary_agent.admin_notifier import AdminNotifier
 from secretary_agent.config import Settings
 from secretary_agent.artifact_generator import ArtifactGenerator
 from secretary_agent.dify_client import DifyAgentClient
@@ -37,6 +38,7 @@ class SecretaryRuntime:
         agent_client: Optional[DifyAgentClient] = None,
         google_client: Optional[GoogleWorkspaceClient] = None,
         browser_automation: Optional[BrowserAutomationManager] = None,
+        admin_notifier: Optional[AdminNotifier] = None,
     ):
         self.settings = settings
         self.store = store
@@ -58,6 +60,7 @@ class SecretaryRuntime:
         self.stop_event = Event()
         self.worker: Optional[Thread] = None
         self.logger = logging.getLogger("lineagent.runtime")
+        self.admin_notifier = admin_notifier
         self._active_run_id_for_service_artifacts = 0
         self.current_memory_key_for_resolution = ""
 
@@ -436,6 +439,16 @@ class SecretaryRuntime:
             push_target = self._memory_key_to_push_target(run.memory_key)
             self.messenger.push_text(push_target, self.USER_SAFE_ERROR_TEXT)
             self.store.append_history(run.memory_key, "assistant", self.USER_SAFE_ERROR_TEXT)
+            if self.admin_notifier:
+                self.admin_notifier.notify_system_error(
+                    event="task_failed",
+                    summary="使用者任務處理失敗",
+                    fields={
+                        "run_id": run.id,
+                        "memory_key": run.memory_key,
+                        "error_type": type(err).__name__,
+                    },
+                )
 
     def _build_planning_goal(self, user_goal: str, context: Dict[str, Any]) -> str:
         artifacts = context.get("artifacts", [])

@@ -286,6 +286,12 @@ class SecretaryRuntime:
                 user_goal=planning_goal,
                 runtime_context=context,
             )
+            plan = self._replan_if_google_query_contract_missing(
+                run=run,
+                planning_goal=planning_goal,
+                runtime_context=context,
+                plan=plan,
+            )
             self.logger.info(
                 format_log_event(
                     "task_plan_completed",
@@ -478,6 +484,51 @@ class SecretaryRuntime:
             if fmt not in merged:
                 merged.append(fmt)
         return merged
+
+    def _replan_if_google_query_contract_missing(
+        self,
+        *,
+        run: TaskRun,
+        planning_goal: str,
+        runtime_context: Dict[str, Any],
+        plan: PlannerResult,
+    ) -> PlannerResult:
+        if not self._needs_google_query_contract_retry(run.user_goal, plan):
+            return plan
+
+        repair_goal = (
+            f"{planning_goal}\n\n"
+            "補充要求：這是一個 Google 個人助理查詢。"
+            "如果使用者是在查行程，必須輸出 calendar_action.operation=list_events 與 time_min/time_max；"
+            "如果使用者是在查提醒或待辦，必須輸出 task_action.operation=list_tasks。"
+            "不要只回一般摘要。"
+        )
+        repaired_plan = self.agent_client.plan(
+            memory_key=run.memory_key,
+            user_goal=repair_goal,
+            runtime_context=runtime_context,
+        )
+        self.logger.info(
+            format_log_event(
+                "task_replanned_for_google_query_contract",
+                run_id=run.id,
+                memory_key=run.memory_key,
+                original_task_type=plan.task_type,
+                repaired_task_type=repaired_plan.task_type,
+            )
+        )
+        return repaired_plan
+
+    @staticmethod
+    def _needs_google_query_contract_retry(user_goal: str, plan: PlannerResult) -> bool:
+        if plan.calendar_action or plan.task_action:
+            return False
+        normalized = "".join(user_goal.strip().lower().split())
+        query_tokens = ("有什麼", "有哪些", "查", "看", "列出", "近期", "最近", "今天", "明天", "後天")
+        asks_query = any(token in normalized for token in query_tokens)
+        asks_calendar = any(token in normalized for token in ("行程", "日程", "日曆", "calendar"))
+        asks_tasks = any(token in normalized for token in ("提醒", "待辦", "待办", "task", "任務", "事情"))
+        return asks_query and (asks_calendar or asks_tasks)
 
     def _generate_requested_artifacts(
         self,

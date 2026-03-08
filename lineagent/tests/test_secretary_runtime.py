@@ -684,6 +684,45 @@ class SecretaryRuntimeTest(unittest.TestCase):
         self.assertIn("待辦事項", self.messenger.pushes[0][1])
         self.assertIn("開會", self.messenger.pushes[0][1])
 
+    def test_google_query_without_structured_action_triggers_contract_replan(self):
+        google = FakeGoogleClient(
+            configured=True,
+            tasks=[{"title": "開會", "due": "2026-03-10T18:00:00+08:00", "status": "needsAction"}],
+        )
+        agent = FakeAgentClient(
+            [
+                PlannerResult(task_type="information_request", final_reply="你今天目前有 1 件待辦事項。"),
+                PlannerResult(
+                    task_type="action_prep",
+                    task_action={"operation": "list_tasks"},
+                    final_reply="你今天的提醒如下：",
+                ),
+            ]
+        )
+        runtime = SecretaryRuntime(
+            settings=FakeSettings(),
+            store=self.store,
+            messenger=self.messenger,
+            agent_client=agent,
+            google_client=google,
+            browser_automation=FakeBrowserAutomation(),
+        )
+        self.store.upsert_connected_account(
+            "user:U123",
+            service_name="google",
+            login_identifier="google-linked-account",
+            display_name="Google",
+            oauth_provider="google",
+            session_available=True,
+            metadata={"access_token": "fake", "refresh_token": "fake"},
+        )
+        runtime.handle_inbound_message(self.inbound("我今天有什麼事情", line_event_id="evt-google-query-replan"))
+        runtime.process_next_run()
+        self.assertEqual(len(agent.calls), 2)
+        self.assertIn("Google 個人助理查詢", agent.calls[1]["user_goal"])
+        self.assertIn("待辦事項", self.messenger.pushes[0][1])
+        self.assertIn("開會", self.messenger.pushes[0][1])
+
     def test_trip_planning_does_not_trigger_google_auth_for_itinerary_text_request(self):
         runtime = SecretaryRuntime(
             settings=FakeSettings(),

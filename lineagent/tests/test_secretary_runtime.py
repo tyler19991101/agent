@@ -579,6 +579,31 @@ class SecretaryRuntimeTest(unittest.TestCase):
         self.assertEqual(len(browser.calls), 0)
         self.assertIn("下一階段", self.messenger.pushes[0][1])
 
+    def test_invalid_browser_request_is_ignored(self):
+        browser = FakeBrowserAutomation(store=self.store)
+        runtime = SecretaryRuntime(
+            settings=FakeSettings(),
+            store=self.store,
+            messenger=self.messenger,
+            agent_client=FakeAgentClient(
+                [
+                    PlannerResult(
+                        task_type="research_and_compare",
+                        final_reply="附近有幾家餐廳可以考慮。",
+                        browser_request={"domain": "agoda.com", "intent": "   "},
+                    )
+                ]
+            ),
+            google_client=FakeGoogleClient(),
+            browser_automation=browser,
+        )
+        runtime.handle_inbound_message(self.inbound("三峽北大有什麼好吃的", line_event_id="evt-invalid-browser-request"))
+        runtime.process_next_run()
+        self.assertEqual(len(browser.calls), 0)
+        self.assertEqual(len(self.messenger.pushes), 1)
+        self.assertIn("附近有幾家餐廳可以考慮", self.messenger.pushes[0][1])
+        self.assertNotIn("下一階段", self.messenger.pushes[0][1])
+
     def test_calendar_query_executes_dify_list_events_action(self):
         google = FakeGoogleClient(
             configured=True,
@@ -685,6 +710,64 @@ class SecretaryRuntimeTest(unittest.TestCase):
         runtime.process_next_run()
         self.assertNotIn("Google 授權", self.messenger.pushes[0][1])
         self.assertIn("名古屋行程建議", self.messenger.pushes[0][1])
+
+    def test_invalid_empty_calendar_action_is_ignored(self):
+        runtime = SecretaryRuntime(
+            settings=FakeSettings(),
+            store=self.store,
+            messenger=self.messenger,
+            agent_client=FakeAgentClient(
+                [
+                    PlannerResult(
+                        task_type="research_and_compare",
+                        final_reply="附近有幾家餐廳可以考慮。",
+                        calendar_action={"operation": "   "},
+                    )
+                ]
+            ),
+            google_client=FakeGoogleClient(configured=True),
+            browser_automation=FakeBrowserAutomation(),
+        )
+        runtime.handle_inbound_message(self.inbound("三峽北大有什麼好吃的", line_event_id="evt-empty-calendar-action"))
+        runtime.process_next_run()
+        self.assertEqual(len(self.messenger.pushes), 1)
+        self.assertIn("附近有幾家餐廳可以考慮", self.messenger.pushes[0][1])
+
+    def test_invalid_calendar_action_falls_back_to_valid_task_action(self):
+        google = FakeGoogleClient(
+            configured=True,
+            tasks=[{"title": "開會", "due": "2026-03-10T15:00:00+08:00", "status": "needsAction"}],
+        )
+        runtime = SecretaryRuntime(
+            settings=FakeSettings(),
+            store=self.store,
+            messenger=self.messenger,
+            agent_client=FakeAgentClient(
+                [
+                    PlannerResult(
+                        task_type="action_prep",
+                        calendar_action={"operation": ""},
+                        task_action={"operation": "list_tasks"},
+                        final_reply="你目前的提醒如下：",
+                    )
+                ]
+            ),
+            google_client=google,
+            browser_automation=FakeBrowserAutomation(),
+        )
+        self.store.upsert_connected_account(
+            "user:U123",
+            service_name="google",
+            login_identifier="google-linked-account",
+            display_name="Google",
+            oauth_provider="google",
+            session_available=True,
+            metadata={"access_token": "fake", "refresh_token": "fake"},
+        )
+        runtime.handle_inbound_message(self.inbound("我目前有哪些提醒", line_event_id="evt-task-fallback"))
+        runtime.process_next_run()
+        self.assertIn("待辦事項", self.messenger.pushes[0][1])
+        self.assertIn("開會", self.messenger.pushes[0][1])
 
     def test_declining_google_auth_replans_as_text_only(self):
         runtime = SecretaryRuntime(

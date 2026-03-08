@@ -721,7 +721,8 @@ class SecretaryRuntime:
             )
 
     def _handle_google_workspace_action(self, run: TaskRun, plan: PlannerResult) -> Dict[str, Any]:
-        action = plan.calendar_action or plan.task_action
+        calendar_action, task_action = self._normalized_google_workspace_actions(plan)
+        action = calendar_action or task_action
         if not action:
             return {}
         if not self._should_allow_google_workspace_action(run.user_goal, plan):
@@ -772,8 +773,8 @@ class SecretaryRuntime:
                 return {"status": "awaiting_google_auth"}
 
             token_payload = self._account_token_payload(account)
-            if plan.calendar_action:
-                result = self._execute_calendar_action(run, token_payload, plan.calendar_action)
+            if calendar_action:
+                result = self._execute_calendar_action(run, token_payload, calendar_action)
                 if result.get("status") == "awaiting_approval":
                     return result
                 self.store.upsert_connected_account(
@@ -790,8 +791,8 @@ class SecretaryRuntime:
                     "action_links": result.get("action_links", []),
                     "authoritative": True,
                 }
-            if plan.task_action:
-                result = self._execute_task_action(run, token_payload, plan.task_action)
+            if task_action:
+                result = self._execute_task_action(run, token_payload, task_action)
                 if result.get("status") == "awaiting_approval":
                     return result
                 self.store.upsert_connected_account(
@@ -826,8 +827,28 @@ class SecretaryRuntime:
             self.current_memory_key_for_resolution = ""
         return {}
 
+    @staticmethod
+    def _normalize_google_workspace_action(action: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(action, dict):
+            return {}
+        operation = str(action.get("operation", "")).strip()
+        if not operation:
+            return {}
+        normalized = dict(action)
+        normalized["operation"] = operation
+        return normalized
+
+    def _normalized_google_workspace_actions(self, plan: PlannerResult) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        return (
+            self._normalize_google_workspace_action(plan.calendar_action),
+            self._normalize_google_workspace_action(plan.task_action),
+        )
+
     def _should_allow_google_workspace_action(self, user_goal: str, plan: PlannerResult) -> bool:
-        operation = str((plan.calendar_action or plan.task_action).get("operation", "")).strip()
+        calendar_action, task_action = self._normalized_google_workspace_actions(plan)
+        operation = str((calendar_action or task_action).get("operation", "")).strip()
+        if not operation:
+            return False
         if operation in {"list_events", "list_tasks", "update_event", "cancel_event", "update_task", "complete_task", "delete_task"}:
             return True
         normalized = "".join(user_goal.strip().lower().split())
@@ -1227,20 +1248,34 @@ class SecretaryRuntime:
         )
 
     def _handle_browser_request(self, run: TaskRun, plan: PlannerResult) -> Dict[str, Any]:
-        if not plan.browser_request:
+        browser_request = self._normalize_browser_request(plan.browser_request)
+        if not browser_request:
             return {}
         self.logger.info(
             format_log_event(
                 "browser_request_deferred",
                 run_id=run.id,
                 memory_key=run.memory_key,
-                domain=plan.browser_request.get("domain", ""),
-                intent=plan.browser_request.get("intent", ""),
+                domain=browser_request.get("domain", ""),
+                intent=browser_request.get("intent", ""),
             )
         )
         return {
             "final_reply": "網站自動操作到付款前的功能會放到下一階段，目前先提供個人記憶、行事曆與提醒事項服務。",
         }
+
+    @staticmethod
+    def _normalize_browser_request(browser_request: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(browser_request, dict):
+            return {}
+        domain = str(browser_request.get("domain", "")).strip()
+        intent = str(browser_request.get("intent", "")).strip()
+        if not domain or not intent:
+            return {}
+        normalized = dict(browser_request)
+        normalized["domain"] = domain
+        normalized["intent"] = intent
+        return normalized
 
     def _serialize_accounts(self, memory_key: str) -> List[Dict[str, Any]]:
         results: List[Dict[str, Any]] = []

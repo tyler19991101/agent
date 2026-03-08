@@ -1,7 +1,7 @@
 import json
 import uuid
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -11,6 +11,28 @@ from secretary_agent.utils import extract_json_object, normalize_bool
 
 class DifyAgentClient:
     _PROMPT_PATH = Path(__file__).resolve().parent.parent / "dify" / "SYSTEM_PROMPT.md"
+    _ALLOWED_CALENDAR_OPERATIONS = {
+        "create_event",
+        "update_event",
+        "cancel_event",
+        "delete_event",
+        "list_events",
+    }
+    _ALLOWED_TASK_OPERATIONS = {
+        "create_task",
+        "update_task",
+        "complete_task",
+        "list_tasks",
+        "delete_task",
+    }
+    _ALLOWED_MEMORY_ACTIONS = {
+        "save_profile",
+        "update_profile",
+        "forget_profile",
+        "save_account",
+        "forget_account",
+    }
+    _ALLOWED_OUTPUT_FORMATS = {"txt", "docx", "pdf"}
 
     def __init__(self, *, api_key: str, base_url: str, user_prefix: str):
         self.api_key = api_key
@@ -96,6 +118,26 @@ class DifyAgentClient:
         except Exception:
             return PlannerResult(final_reply=answer or "目前無法產生秘書回覆。", raw_answer=answer)
 
+        calendar_action = self._normalize_action_payload(
+            payload.get("calendar_action", {}),
+            allowed_operations=self._ALLOWED_CALENDAR_OPERATIONS,
+        )
+        task_action = self._normalize_action_payload(
+            payload.get("task_action", {}),
+            allowed_operations=self._ALLOWED_TASK_OPERATIONS,
+        )
+        browser_request = self._normalize_browser_request(payload.get("browser_request", {}))
+        memory_actions = self._normalize_memory_actions(payload.get("memory_actions", []))
+        requested_outputs = self._normalize_requested_outputs(payload.get("requested_outputs", []))
+        profile_updates = self._normalize_profile_updates(
+            payload.get("profile_updates", {}),
+            memory_actions=memory_actions,
+        )
+        account_updates = self._normalize_account_updates(
+            payload.get("account_updates", []),
+            memory_actions=memory_actions,
+        )
+
         return PlannerResult(
             task_type=str(payload.get("task_type", "information_request")),
             goal_summary=str(payload.get("goal_summary", "")),
@@ -112,23 +154,100 @@ class DifyAgentClient:
             action_links=list(payload.get("action_links", []) or []),
             warnings=list(payload.get("warnings", []) or []),
             missing_info=list(payload.get("missing_info", []) or []),
-            profile_updates=dict(payload.get("profile_updates", {}) or {}),
-            account_updates=list(payload.get("account_updates", []) or []),
-            memory_actions=list(payload.get("memory_actions", []) or []),
-            calendar_action=dict(payload.get("calendar_action", {}) or {}),
-            task_action=dict(payload.get("task_action", {}) or {}),
-            browser_request=dict(payload.get("browser_request", {}) or {}),
-            requested_outputs=list(payload.get("requested_outputs", []) or []),
+            profile_updates=profile_updates,
+            account_updates=account_updates,
+            memory_actions=memory_actions,
+            calendar_action=calendar_action,
+            task_action=task_action,
+            browser_request=browser_request,
+            requested_outputs=requested_outputs,
             document_title=str(payload.get("document_title", "")),
             raw_answer=answer,
         )
 
     @staticmethod
+    def _normalize_action_payload(raw_action: Any, *, allowed_operations: Set[str]) -> Dict[str, Any]:
+        if not isinstance(raw_action, dict):
+            return {}
+        operation = str(raw_action.get("operation", "")).strip()
+        if operation not in allowed_operations:
+            return {}
+        normalized = dict(raw_action)
+        normalized["operation"] = operation
+        return normalized
+
+    @staticmethod
+    def _normalize_browser_request(raw_request: Any) -> Dict[str, Any]:
+        if not isinstance(raw_request, dict):
+            return {}
+        domain = str(raw_request.get("domain", "")).strip()
+        intent = str(raw_request.get("intent", "")).strip()
+        if not domain or not intent:
+            return {}
+        normalized = dict(raw_request)
+        normalized["domain"] = domain
+        normalized["intent"] = intent
+        return normalized
+
+    def _normalize_memory_actions(self, raw_actions: Any) -> List[str]:
+        if not isinstance(raw_actions, list):
+            return []
+        normalized: List[str] = []
+        for item in raw_actions:
+            action = str(item).strip()
+            if action in self._ALLOWED_MEMORY_ACTIONS and action not in normalized:
+                normalized.append(action)
+        return normalized
+
+    def _normalize_requested_outputs(self, raw_outputs: Any) -> List[str]:
+        if not isinstance(raw_outputs, list):
+            return []
+        normalized: List[str] = []
+        for item in raw_outputs:
+            fmt = str(item).strip().lower()
+            if fmt in self._ALLOWED_OUTPUT_FORMATS and fmt not in normalized:
+                normalized.append(fmt)
+        return normalized
+
+    @staticmethod
+    def _normalize_profile_updates(raw_profile: Any, *, memory_actions: List[str]) -> Dict[str, Any]:
+        if not isinstance(raw_profile, dict):
+            return {}
+        if not any(action in memory_actions for action in {"save_profile", "update_profile", "forget_profile"}):
+            return {}
+        return dict(raw_profile)
+
+    @staticmethod
+    def _normalize_account_updates(raw_accounts: Any, *, memory_actions: List[str]) -> List[Dict[str, Any]]:
+        if not isinstance(raw_accounts, list):
+            return []
+        if not any(action in memory_actions for action in {"save_account", "forget_account"}):
+            return []
+        normalized: List[Dict[str, Any]] = []
+        for item in raw_accounts:
+            if not isinstance(item, dict):
+                continue
+            service_name = str(item.get("service_name", "")).strip()
+            login_identifier = str(item.get("login_identifier", "")).strip()
+            if "forget_account" in memory_actions:
+                if not service_name:
+                    continue
+            elif not service_name or not login_identifier:
+                continue
+            normalized_item = dict(item)
+            if service_name:
+                normalized_item["service_name"] = service_name
+            if login_identifier:
+                normalized_item["login_identifier"] = login_identifier
+            normalized.append(normalized_item)
+        return normalized
+
+    @staticmethod
     def _build_multipart_form_data(
         *,
         fields: Dict[str, str],
-        files: Dict[str, tuple[str, bytes, str]],
-    ) -> tuple[bytes, str]:
+        files: Dict[str, Tuple[str, bytes, str]],
+    ) -> Tuple[bytes, str]:
         boundary = f"----CodexBoundary{uuid.uuid4().hex}"
         body = bytearray()
 

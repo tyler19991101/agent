@@ -22,9 +22,6 @@ class GoogleWorkspaceClient:
     CALENDAR_SCOPES = (
         "https://www.googleapis.com/auth/calendar",
         "https://www.googleapis.com/auth/tasks",
-        "openid",
-        "email",
-        "profile",
     )
 
     def __init__(self, settings: Settings):
@@ -77,15 +74,6 @@ class GoogleWorkspaceClient:
         if "access_token" not in token_payload:
             raise GoogleWorkspaceError("Google token exchange failed")
         return token_payload
-
-    def fetch_userinfo(self, token_payload: Dict[str, Any]) -> Dict[str, Any]:
-        req = Request(
-            "https://www.googleapis.com/oauth2/v2/userinfo",
-            headers={"Authorization": f"Bearer {token_payload['access_token']}"},
-            method="GET",
-        )
-        with urlopen(req, timeout=30) as resp:
-            return json.loads(resp.read().decode("utf-8"))
 
     def create_event(self, token_payload: Dict[str, Any], event: Dict[str, Any]) -> Dict[str, Any]:
         service = build("calendar", "v3", credentials=self._credentials(token_payload), cache_discovery=False)

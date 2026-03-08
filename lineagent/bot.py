@@ -113,13 +113,11 @@ def google_auth_callback():
         abort(400)
     try:
         token_payload = runtime.google_client.exchange_code(code)
-        userinfo = runtime.google_client.fetch_userinfo(token_payload)
-        token_payload["userinfo"] = userinfo
         store.upsert_connected_account(
             row["memory_key"],
             service_name="google",
-            login_identifier=str(userinfo.get("email", "")).strip() or "google-account",
-            display_name=str(userinfo.get("name", "")).strip() or str(userinfo.get("email", "")).strip(),
+            login_identifier="google-linked-account",
+            display_name="Google",
             oauth_provider="google",
             session_available=True,
             metadata=token_payload,
@@ -127,7 +125,7 @@ def google_auth_callback():
         store.log_memory_change(
             row["memory_key"],
             "google_account_connected",
-            {"email": userinfo.get("email", ""), "name": userinfo.get("name", "")},
+            {"account_label": "Google"},
         )
         store.resolve_oauth_state(state_token)
         if row["run_id"]:

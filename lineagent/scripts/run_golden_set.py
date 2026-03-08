@@ -13,6 +13,20 @@ if str(ROOT) not in sys.path:
 from secretary_agent.dify_client import DifyAgentClient
 
 
+def load_env_file(path: Path) -> None:
+    if not path.is_file():
+        return
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip("'").strip('"')
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
 def load_cases(path: Path) -> List[Dict[str, Any]]:
     with path.open("r", encoding="utf-8") as fh:
         return json.load(fh)
@@ -109,6 +123,7 @@ def check_expectations(expected: Dict[str, Any], actual: Dict[str, Any]) -> Tupl
 
 
 def main() -> int:
+    load_env_file(ROOT / ".env.bot")
     api_key = os.getenv("DIFY_API_KEY", "").strip()
     base_url = os.getenv("DIFY_BASE_URL", "https://api.dify.ai/v1").strip()
     user_prefix = os.getenv("DIFY_USER_PREFIX", "line").strip()

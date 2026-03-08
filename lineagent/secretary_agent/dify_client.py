@@ -1,6 +1,5 @@
 import json
 import uuid
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -10,7 +9,6 @@ from secretary_agent.utils import extract_json_object, normalize_bool
 
 
 class DifyAgentClient:
-    _PROMPT_PATH = Path(__file__).resolve().parent.parent / "dify" / "SYSTEM_PROMPT.md"
     _ALLOWED_CALENDAR_OPERATIONS = {
         "create_event",
         "update_event",
@@ -74,9 +72,7 @@ class DifyAgentClient:
 
     def _build_prompt(self, *, user_goal: str, runtime_context: Dict[str, Any]) -> str:
         context_json = json.dumps(runtime_context, ensure_ascii=False, indent=2)
-        system_prompt = self._PROMPT_PATH.read_text(encoding="utf-8").strip()
         return (
-            f"{system_prompt}\n\n"
             f"使用者最新目標：{user_goal}\n"
             f"目前執行上下文：\n{context_json}"
         )

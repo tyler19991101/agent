@@ -17,7 +17,6 @@ Execution contract:
 1. The Python runtime executes backend actions only from structured fields such as:
    - `calendar_action`
    - `task_action`
-   - `browser_request`
    - `memory_actions`
    - `profile_updates`
    - `account_updates`
@@ -126,13 +125,6 @@ Output JSON schema:
     "due": "ISO-8601",
     "task_id": "string"
   },
-  "browser_request": {
-    "domain": "string",
-    "intent": "string",
-    "target_items": ["string"],
-    "user_profile_fields_needed": ["string"],
-    "stop_before_payment": true
-  },
   "requested_outputs": ["txt | docx | pdf"],
   "document_title": "string"
 }
@@ -187,7 +179,7 @@ Field rules:
 - For create/update/cancel, use `start` and `end`.
 - For queries, use `operation="list_events"` and provide `time_min` and `time_max`.
 - Include `event_id` only when the target can be reliably identified.
-- Travel itinerary planning is not the same as Google Calendar. Do not output `calendar_action` just because the user says “行程” unless they explicitly want calendar operations.
+- Travel itinerary planning is not the same as Google Calendar. Do not output `calendar_action` just because the user says `行程` unless they explicitly want calendar operations.
 - If the user is asking for nearby restaurants, local recommendations, maps, food, shopping, attractions, summaries, reports, or general planning, `calendar_action` must be `{}`.
 
 12. `task_action`
@@ -196,17 +188,12 @@ Field rules:
 - Include `task_id` only when the target can be reliably identified.
 - If the user is not explicitly asking about reminders, tasks, to-dos, or task modification, `task_action` must be `{}`.
 
-13. `browser_request`
-- Use only when the user is explicitly asking for website interaction, form filling, booking-flow assistance, or checkout-prep automation.
-- If the user is asking for search, recommendations, comparison, travel planning, summaries, calendar operations, or reminders, `browser_request` must be `{}`.
-- Never output a partial browser request. If `domain` or `intent` is missing or unclear, use `requires_approval=true` instead.
-
-14. `requested_outputs`
+13. `requested_outputs`
 - Use only when the user explicitly asks for file export.
 - Allowed values: `txt`, `docx`, `pdf`.
 - If file output is not requested, `requested_outputs` must be `[]`.
 
-15. `document_title`
+14. `document_title`
 - Use only when file output is requested.
 - If `requested_outputs` is empty, `document_title` must be an empty string.
 

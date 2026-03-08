@@ -118,6 +118,17 @@ class DifyAgentClientParseAnswerTest(unittest.TestCase):
         self.assertEqual(result.profile_updates, {})
         self.assertEqual(result.account_updates, [])
 
+    def test_build_prompt_contains_only_goal_and_runtime_context(self):
+        client = self.make_client()
+        prompt = client._build_prompt(
+            user_goal="提醒我明天下午三點開會",
+            runtime_context={"current_date_local": "2026-03-08", "current_timezone": "Asia/Taipei"},
+        )
+
+        self.assertIn("使用者最新目標：提醒我明天下午三點開會", prompt)
+        self.assertIn('"current_date_local": "2026-03-08"', prompt)
+        self.assertNotIn("Execution contract:", prompt)
+
 
 if __name__ == "__main__":
     unittest.main()

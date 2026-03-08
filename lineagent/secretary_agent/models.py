@@ -24,6 +24,8 @@ class InboundMessage:
 
 @dataclass
 class PlannerResult:
+    conversation_mode: str = "new_task"
+    context_usage: str = "none"
     task_type: str = "information_request"
     goal_summary: str = ""
     subtasks: List[str] = field(default_factory=list)

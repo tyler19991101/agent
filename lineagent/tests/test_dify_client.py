@@ -94,6 +94,22 @@ class DifyAgentClientParseAnswerTest(unittest.TestCase):
         self.assertEqual(result.memory_actions, ["save_profile"])
         self.assertEqual(result.requested_outputs, ["pdf", "docx"])
 
+    def test_parse_answer_keeps_conversation_mode_and_context_usage(self):
+        client = self.make_client()
+        result = client._parse_answer(
+            """
+            {
+              "conversation_mode": "casual_reply",
+              "context_usage": "none",
+              "task_type": "information_request",
+              "final_reply": "你好，我在。"
+            }
+            """
+        )
+
+        self.assertEqual(result.conversation_mode, "casual_reply")
+        self.assertEqual(result.context_usage, "none")
+
     def test_parse_answer_drops_memory_updates_without_memory_actions(self):
         client = self.make_client()
         result = client._parse_answer(

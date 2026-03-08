@@ -19,7 +19,6 @@ from secretary_agent.utils import (
     REJECTION_KEYWORDS,
     RESET_COMMANDS,
     infer_requested_outputs,
-    looks_like_short_followup,
     normalize_service_name,
     parse_memory_command,
     prefers_file_only_response,
@@ -119,6 +118,12 @@ class SecretaryRuntime:
 
         pending = self.store.get_open_approval(inbound.memory_key)
         quoted_text = self.store.get_bot_message_content(inbound.quoted_message_id)
+        if pending:
+            pending_decision = self._decide_pending_followup(pending, inbound, quoted_text)
+            if pending_decision == "casual_reply":
+                return
+            if pending_decision == "new_task":
+                pending = None
         if pending and self._should_resume_pending(pending, inbound, quoted_text):
             pending_run = self.store.get_task_run(int(pending["run_id"]))
             if pending_run.current_phase == "awaiting_google_auth" and self._looks_like_google_auth_decline(text):
@@ -606,7 +611,92 @@ class SecretaryRuntime:
         lower = inbound.text.strip().lower()
         if lower in APPROVAL_KEYWORDS or lower in REJECTION_KEYWORDS:
             return True
-        return looks_like_short_followup(inbound.text) and bool(quoted_text or pending)
+        selected_option = self._match_pending_approval_option(pending, inbound.text)
+        return bool(selected_option)
+
+    def _decide_pending_followup(self, pending: Any, inbound: InboundMessage, quoted_text: str) -> str:
+        if self._looks_like_casual_message(inbound.text):
+            self._respond_immediate(inbound, "你好，我在。你可以直接告訴我現在要我幫你做什麼。")
+            return "casual_reply"
+
+        prompt_message_id = pending["prompt_message_id"]
+        if prompt_message_id and inbound.quoted_message_id == prompt_message_id:
+            return "continue_task"
+
+        lower = inbound.text.strip().lower()
+        if lower in APPROVAL_KEYWORDS or lower in REJECTION_KEYWORDS:
+            return "continue_task"
+
+        selected_option = self._match_pending_approval_option(pending, inbound.text)
+        if selected_option:
+            return "continue_task"
+
+        pending_context = self.store.build_runtime_context(int(pending["run_id"]), inbound.memory_key)
+        pending_context["pending_approval"] = {
+            "approval_type": pending["approval_type"],
+            "prompt_text": pending["prompt_text"],
+            "options": json.loads(pending["options_json"] or "[]"),
+        }
+        pending_context["quoted_message_text"] = quoted_text
+        pending_context["latest_user_message"] = inbound.text
+        current_local = datetime.now().astimezone()
+        pending_context["current_datetime_local"] = current_local.isoformat()
+        pending_context["current_date_local"] = current_local.date().isoformat()
+        pending_context["current_timezone"] = str(current_local.tzinfo or "UTC")
+
+        try:
+            plan = self.agent_client.plan(
+                memory_key=inbound.memory_key,
+                user_goal=inbound.text,
+                runtime_context=pending_context,
+            )
+        except Exception as err:
+            self.logger.exception(
+                format_log_event(
+                    "pending_followup_decision_failed",
+                    run_id=pending["run_id"],
+                    memory_key=inbound.memory_key,
+                    error_type=type(err).__name__,
+                )
+            )
+            return "new_task"
+
+        self.logger.info(
+            format_log_event(
+                "pending_followup_decided",
+                run_id=pending["run_id"],
+                memory_key=inbound.memory_key,
+                conversation_mode=plan.conversation_mode,
+                context_usage=plan.context_usage,
+                task_type=plan.task_type,
+            )
+        )
+        if plan.conversation_mode == "continue_task":
+            return "continue_task"
+        if plan.conversation_mode == "casual_reply":
+            reply = plan.final_reply or "你好，我在。你可以直接告訴我現在要我幫你做什麼。"
+            self._respond_immediate(inbound, reply)
+            return "casual_reply"
+        return "new_task"
+
+    @staticmethod
+    def _looks_like_casual_message(text: str) -> bool:
+        normalized = "".join(text.strip().lower().split())
+        return normalized in {
+            "hi",
+            "hello",
+            "hey",
+            "嗨",
+            "哈囉",
+            "你好",
+            "早安",
+            "午安",
+            "晚安",
+            "哈哈",
+            "謝謝",
+            "thanks",
+            "thankyou",
+        }
 
     def _looks_like_google_auth_decline(self, text: str) -> bool:
         normalized = "".join(text.strip().lower().split())
@@ -1379,6 +1469,8 @@ class SecretaryRuntime:
     @staticmethod
     def _planner_to_dict(plan: PlannerResult) -> Dict[str, Any]:
         return {
+            "conversation_mode": plan.conversation_mode,
+            "context_usage": plan.context_usage,
             "task_type": plan.task_type,
             "goal_summary": plan.goal_summary,
             "subtasks": plan.subtasks,
@@ -1399,7 +1491,6 @@ class SecretaryRuntime:
             "memory_actions": plan.memory_actions,
             "calendar_action": plan.calendar_action,
             "task_action": plan.task_action,
-            "browser_request": plan.browser_request,
             "requested_outputs": plan.requested_outputs,
             "document_title": plan.document_title,
         }

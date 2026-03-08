@@ -404,6 +404,41 @@ class SecretaryRuntimeTest(unittest.TestCase):
         runtime.process_next_run()
         self.assertEqual(len(self.messenger.pushes), 2)
 
+    def test_casual_message_does_not_resume_pending_approval(self):
+        agent_client = FakeAgentClient(
+            [
+                PlannerResult(
+                    task_type="trip_planning",
+                    requires_approval=True,
+                    approval_type="missing_info",
+                    approval_prompt="請告訴我出發日期與預算。",
+                ),
+                PlannerResult(
+                    conversation_mode="casual_reply",
+                    context_usage="none",
+                    task_type="information_request",
+                    final_reply="你好，我在。你可以直接告訴我現在要我幫你做什麼。",
+                ),
+            ]
+        )
+        runtime = SecretaryRuntime(
+            settings=FakeSettings(),
+            store=self.store,
+            messenger=self.messenger,
+            agent_client=agent_client,
+            google_client=FakeGoogleClient(),
+            browser_automation=FakeBrowserAutomation(),
+        )
+        runtime.handle_inbound_message(self.inbound("我要去日本玩", line_event_id="evt-a"))
+        runtime.process_next_run()
+
+        runtime.handle_inbound_message(self.inbound("hi", line_event_id="evt-b"))
+
+        self.assertEqual(self.messenger.replies[-1][1], "你好，我在。你可以直接告訴我現在要我幫你做什麼。")
+        pending = self.store.get_open_approval("user:U123")
+        self.assertIsNotNone(pending)
+        self.assertEqual(int(pending["run_id"]), 1)
+
     def test_memory_command_saves_profile_without_queueing_task(self):
         runtime = SecretaryRuntime(
             settings=FakeSettings(),

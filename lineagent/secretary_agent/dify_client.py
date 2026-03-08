@@ -9,6 +9,8 @@ from secretary_agent.utils import extract_json_object, normalize_bool
 
 
 class DifyAgentClient:
+    _ALLOWED_CONVERSATION_MODES = {"new_task", "continue_task", "casual_reply"}
+    _ALLOWED_CONTEXT_USAGE = {"none", "recent_task", "pending_approval", "quoted_message"}
     _ALLOWED_CALENDAR_OPERATIONS = {
         "create_event",
         "update_event",
@@ -135,6 +137,8 @@ class DifyAgentClient:
         )
 
         return PlannerResult(
+            conversation_mode=self._normalize_conversation_mode(payload.get("conversation_mode")),
+            context_usage=self._normalize_context_usage(payload.get("context_usage")),
             task_type=str(payload.get("task_type", "information_request")),
             goal_summary=str(payload.get("goal_summary", "")),
             subtasks=list(payload.get("subtasks", []) or []),
@@ -160,6 +164,18 @@ class DifyAgentClient:
             document_title=str(payload.get("document_title", "")),
             raw_answer=answer,
         )
+
+    def _normalize_conversation_mode(self, raw_mode: Any) -> str:
+        mode = str(raw_mode or "").strip()
+        if mode in self._ALLOWED_CONVERSATION_MODES:
+            return mode
+        return "new_task"
+
+    def _normalize_context_usage(self, raw_usage: Any) -> str:
+        usage = str(raw_usage or "").strip()
+        if usage in self._ALLOWED_CONTEXT_USAGE:
+            return usage
+        return "none"
 
     @staticmethod
     def _normalize_action_payload(raw_action: Any, *, allowed_operations: Set[str]) -> Dict[str, Any]:

@@ -578,6 +578,76 @@ class SecretaryRuntimeTest(unittest.TestCase):
         self.assertEqual(len(browser.calls), 0)
         self.assertIn("下一階段", self.messenger.pushes[0][1])
 
+    def test_calendar_query_overrides_planner_without_google_action(self):
+        google = FakeGoogleClient(
+            configured=True,
+            events=[
+                {
+                    "summary": "開會",
+                    "start": {"dateTime": "2026-03-10T15:00:00+08:00"},
+                }
+            ],
+        )
+        runtime = SecretaryRuntime(
+            settings=FakeSettings(),
+            store=self.store,
+            messenger=self.messenger,
+            agent_client=FakeAgentClient(
+                [PlannerResult(task_type="trip_planning", final_reply="你目前近期的行程如下")]
+            ),
+            google_client=google,
+            browser_automation=FakeBrowserAutomation(),
+        )
+        self.store.upsert_connected_account(
+            "user:U123",
+            service_name="google",
+            login_identifier="google-linked-account",
+            display_name="Google",
+            oauth_provider="google",
+            session_available=True,
+            metadata={"access_token": "fake", "refresh_token": "fake"},
+        )
+        runtime.handle_inbound_message(self.inbound("我近期的行程有什麼", line_event_id="evt-calendar-query"))
+        runtime.process_next_run()
+        self.assertIn("你近期的 Google 行程", self.messenger.pushes[0][1])
+        self.assertIn("開會", self.messenger.pushes[0][1])
+
+    def test_calendar_query_overrides_wrong_task_list_plan(self):
+        google = FakeGoogleClient(
+            configured=True,
+            events=[
+                {
+                    "summary": "會議",
+                    "start": {"dateTime": "2026-03-10T15:00:00+08:00"},
+                }
+            ],
+            tasks=[{"title": "不該被回"}],
+        )
+        runtime = SecretaryRuntime(
+            settings=FakeSettings(),
+            store=self.store,
+            messenger=self.messenger,
+            agent_client=FakeAgentClient(
+                [PlannerResult(task_type="trip_planning", task_action={"operation": "list_tasks"}, final_reply="你目前近期的行程如下")]
+            ),
+            google_client=google,
+            browser_automation=FakeBrowserAutomation(),
+        )
+        self.store.upsert_connected_account(
+            "user:U123",
+            service_name="google",
+            login_identifier="google-linked-account",
+            display_name="Google",
+            oauth_provider="google",
+            session_available=True,
+            metadata={"access_token": "fake", "refresh_token": "fake"},
+        )
+        runtime.handle_inbound_message(self.inbound("我近期的行程有什麼", line_event_id="evt-calendar-query-2"))
+        runtime.process_next_run()
+        self.assertIn("你近期的 Google 行程", self.messenger.pushes[0][1])
+        self.assertIn("會議", self.messenger.pushes[0][1])
+        self.assertNotIn("待辦事項", self.messenger.pushes[0][1])
+
     def test_split_text_chunks_long_messages(self):
         text = "a" * 9000
         chunks = split_text(text, 4300)

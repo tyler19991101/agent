@@ -146,6 +146,10 @@
   - 應優先回傳 `memory_actions`、`profile_updates`、`account_updates`。
 - 如果使用者要求建立提醒、行事曆、待辦
   - 應優先回傳 `calendar_action` 或 `task_action`。
+- 如果使用者要求查詢「行程 / 日程 / Calendar」
+  - 應優先輸出 `calendar_action={"operation":"list_events"}`，不可只靠上下文摘要或改成 `task_action`。
+- 如果使用者要求查詢「提醒 / 待辦 / Tasks」
+  - 應優先輸出 `task_action={"operation":"list_tasks"}`，不可只靠上下文摘要。
 - 如果使用者要求修改、延後、提前、取消剛建立的提醒或行程
   - 應優先使用執行上下文中的 `recent_service_artifacts` 來找出對應的 `task_id` 或 `event_id`。
   - 若能可靠判定，就輸出 `update_task`、`delete_task`、`update_event` 或 `cancel_event`。

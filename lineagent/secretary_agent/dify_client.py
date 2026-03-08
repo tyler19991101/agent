@@ -86,6 +86,8 @@ class DifyAgentClient:
             "6-1. account_updates 可放需要長期記住的會員帳號識別資料，例如常用 email 或會員編號，但不要放密碼、信用卡、OTP。\n"
             "6-2. 若使用者要你記住、更新或忘記長期資料，請用 memory_actions、profile_updates、account_updates 表達。\n"
             "6-3. 若任務是建立 Google Calendar 行程或 Google Tasks 提醒，請用 calendar_action 或 task_action 輸出結構化操作需求。\n"
+            "6-3-1. 若使用者是在查詢行程、日程、Calendar，請優先輸出 calendar_action={\"operation\":\"list_events\"}，不可只靠上下文摘要，也不可誤改成 task_action。\n"
+            "6-3-2. 若使用者是在查詢提醒、待辦、Tasks，請優先輸出 task_action={\"operation\":\"list_tasks\"}，不可只靠上下文摘要。\n"
             "6-4. 網站自動操作到付款前仍屬下一階段功能；目前若使用者提出此需求，請在 final_reply 與 warnings 中清楚說明目前尚未啟用，且不要輸出 browser_request。\n\n"
             "7. 如果使用者要求輸出成 Word、PDF、TXT 或檔案，請在 requested_outputs 明確列出格式。\n"
             "8. document_title 要給出適合檔案命名的人類可讀標題。\n\n"

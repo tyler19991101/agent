@@ -261,6 +261,7 @@ class SecretaryRuntime:
                 status="completed",
                 output_payload=self._planner_to_dict(plan),
             )
+            self._apply_google_query_overrides(run.user_goal, plan)
             self._apply_planner_memory_updates(run.memory_key, plan)
 
             plan.requested_outputs = self._merge_requested_outputs(run.user_goal, plan.requested_outputs)
@@ -436,6 +437,46 @@ class SecretaryRuntime:
             if fmt not in merged:
                 merged.append(fmt)
         return merged
+
+    def _apply_google_query_overrides(self, user_goal: str, plan: PlannerResult) -> None:
+        normalized = "".join(user_goal.strip().lower().split())
+        is_query = any(token in normalized for token in ("有什麼", "有哪些", "查", "看一下", "看看", "列出", "近期", "最近"))
+        asks_calendar = any(token in normalized for token in ("行程", "日程", "日曆", "calendar"))
+        asks_tasks = any(token in normalized for token in ("提醒", "待辦", "待办", "task", "任務"))
+        if not is_query:
+            return
+        if asks_calendar:
+            plan.calendar_action = self._build_calendar_query_action(user_goal)
+            plan.task_action = {}
+            return
+        if asks_tasks:
+            plan.task_action = {"operation": "list_tasks"}
+            plan.calendar_action = {}
+
+    def _build_calendar_query_action(self, user_goal: str) -> Dict[str, Any]:
+        now_local = datetime.now().astimezone()
+        start = now_local
+        end = now_local + timedelta(days=7)
+        normalized = "".join(user_goal.strip().lower().split())
+        if "今天" in normalized:
+            start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+            end = start + timedelta(days=1)
+        elif "明天" in normalized:
+            start = (now_local + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+            end = start + timedelta(days=1)
+        elif "後天" in normalized:
+            start = (now_local + timedelta(days=2)).replace(hour=0, minute=0, second=0, microsecond=0)
+            end = start + timedelta(days=1)
+        elif "本週" in normalized or "這週" in normalized:
+            start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+            days_until_week_end = 7 - start.isoweekday()
+            end = start + timedelta(days=days_until_week_end + 1)
+        return {
+            "operation": "list_events",
+            "time_min": start.isoformat(),
+            "time_max": end.isoformat(),
+            "timezone": str(now_local.tzinfo or "Asia/Taipei"),
+        }
 
     def _generate_requested_artifacts(
         self,

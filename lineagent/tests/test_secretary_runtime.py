@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+from datetime import datetime, timedelta
 
 from secretary_agent.audio_transcriber import format_diarized_transcript, format_timestamp
 from secretary_agent.memory import SQLiteStore
@@ -647,6 +648,53 @@ class SecretaryRuntimeTest(unittest.TestCase):
         self.assertIn("你近期的 Google 行程", self.messenger.pushes[0][1])
         self.assertIn("會議", self.messenger.pushes[0][1])
         self.assertNotIn("待辦事項", self.messenger.pushes[0][1])
+
+    def test_calendar_query_supports_next_month_phrase(self):
+        runtime = SecretaryRuntime(
+            settings=FakeSettings(),
+            store=self.store,
+            messenger=self.messenger,
+            agent_client=FakeAgentClient([]),
+            google_client=FakeGoogleClient(configured=True),
+            browser_automation=FakeBrowserAutomation(),
+        )
+        action = runtime._build_calendar_query_action("下個月行程")
+        start = datetime.fromisoformat(action["time_min"])
+        end = datetime.fromisoformat(action["time_max"])
+        self.assertEqual(start.day, 1)
+        self.assertEqual(start.hour, 0)
+        self.assertEqual((end.year, end.month), ((start.year + 1, 1) if start.month == 12 else (start.year, start.month + 1)))
+
+    def test_calendar_query_supports_explicit_month_phrase(self):
+        runtime = SecretaryRuntime(
+            settings=FakeSettings(),
+            store=self.store,
+            messenger=self.messenger,
+            agent_client=FakeAgentClient([]),
+            google_client=FakeGoogleClient(configured=True),
+            browser_automation=FakeBrowserAutomation(),
+        )
+        action = runtime._build_calendar_query_action("查詢我9月的行程")
+        start = datetime.fromisoformat(action["time_min"])
+        end = datetime.fromisoformat(action["time_max"])
+        self.assertEqual(start.month, 9)
+        self.assertEqual(start.day, 1)
+        self.assertTrue(end > start)
+
+    def test_calendar_query_supports_recent_n_days_phrase(self):
+        runtime = SecretaryRuntime(
+            settings=FakeSettings(),
+            store=self.store,
+            messenger=self.messenger,
+            agent_client=FakeAgentClient([]),
+            google_client=FakeGoogleClient(configured=True),
+            browser_automation=FakeBrowserAutomation(),
+        )
+        action = runtime._build_calendar_query_action("我最近五天有什麼行程")
+        start = datetime.fromisoformat(action["time_min"])
+        end = datetime.fromisoformat(action["time_max"])
+        self.assertEqual(start.hour, 0)
+        self.assertEqual(end - start, timedelta(days=5))
 
     def test_split_text_chunks_long_messages(self):
         text = "a" * 9000

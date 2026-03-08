@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 import time
 from datetime import datetime, timedelta, timezone
 from threading import Event, Thread
@@ -458,6 +459,8 @@ class SecretaryRuntime:
         start = now_local
         end = now_local + timedelta(days=7)
         normalized = "".join(user_goal.strip().lower().split())
+        digits_match = re.search(r"(最近|未來|接下來)([0-9一二三四五六七八九十兩兩個兩天十\d]+)天", user_goal)
+        explicit_month_match = re.search(r"(?<!\d)(\d{1,2})月", user_goal)
         if "今天" in normalized:
             start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
             end = start + timedelta(days=1)
@@ -471,12 +474,76 @@ class SecretaryRuntime:
             start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
             days_until_week_end = 7 - start.isoweekday()
             end = start + timedelta(days=days_until_week_end + 1)
+        elif "下週" in normalized:
+            current_week_start = (now_local - timedelta(days=now_local.isoweekday() - 1)).replace(hour=0, minute=0, second=0, microsecond=0)
+            start = current_week_start + timedelta(days=7)
+            end = start + timedelta(days=7)
+        elif "本週末" in normalized or "這週末" in normalized:
+            current_week_start = (now_local - timedelta(days=now_local.isoweekday() - 1)).replace(hour=0, minute=0, second=0, microsecond=0)
+            start = current_week_start + timedelta(days=5)
+            end = start + timedelta(days=2)
+        elif "下個月" in normalized or "下个月" in normalized:
+            year = now_local.year + (1 if now_local.month == 12 else 0)
+            month = 1 if now_local.month == 12 else now_local.month + 1
+            start = now_local.replace(year=year, month=month, day=1, hour=0, minute=0, second=0, microsecond=0)
+            end = self._next_month_start(start)
+        elif explicit_month_match:
+            month = int(explicit_month_match.group(1))
+            if 1 <= month <= 12:
+                year = now_local.year
+                if month < now_local.month:
+                    year += 1
+                start = now_local.replace(year=year, month=month, day=1, hour=0, minute=0, second=0, microsecond=0)
+                end = self._next_month_start(start)
+        elif digits_match:
+            days = self._parse_chinese_or_digit_number(digits_match.group(2))
+            start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+            end = start + timedelta(days=max(days, 1))
         return {
             "operation": "list_events",
             "time_min": start.isoformat(),
             "time_max": end.isoformat(),
             "timezone": str(now_local.tzinfo or "Asia/Taipei"),
         }
+
+    @staticmethod
+    def _next_month_start(value: datetime) -> datetime:
+        year = value.year + (1 if value.month == 12 else 0)
+        month = 1 if value.month == 12 else value.month + 1
+        return value.replace(year=year, month=month, day=1, hour=0, minute=0, second=0, microsecond=0)
+
+    @staticmethod
+    def _parse_chinese_or_digit_number(value: str) -> int:
+        text = str(value).strip()
+        if text.isdigit():
+            return int(text)
+        mapping = {
+            "一": 1,
+            "二": 2,
+            "兩": 2,
+            "三": 3,
+            "四": 4,
+            "五": 5,
+            "六": 6,
+            "七": 7,
+            "八": 8,
+            "九": 9,
+            "十": 10,
+        }
+        if text in mapping:
+            return mapping[text]
+        if text.startswith("十"):
+            suffix = mapping.get(text[1:], 0)
+            return 10 + suffix
+        if text.endswith("十"):
+            prefix = mapping.get(text[0], 1)
+            return prefix * 10
+        if "十" in text:
+            parts = text.split("十", 1)
+            prefix = mapping.get(parts[0], 1)
+            suffix = mapping.get(parts[1], 0)
+            return prefix * 10 + suffix
+        return 7
 
     def _generate_requested_artifacts(
         self,

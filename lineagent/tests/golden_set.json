@@ -1,0 +1,159 @@
+[
+  {
+    "id": "casual_hi",
+    "category": "casual_reply",
+    "user_input": "hi",
+    "expected": {
+      "conversation_mode": "casual_reply",
+      "context_usage": "none",
+      "task_type": "information_request",
+      "execution_fields": {
+        "calendar_action": {},
+        "task_action": {},
+        "memory_actions": [],
+        "profile_updates": {},
+        "account_updates": [],
+        "requested_outputs": []
+      }
+    }
+  },
+  {
+    "id": "casual_thanks",
+    "category": "casual_reply",
+    "user_input": "謝謝",
+    "expected": {
+      "conversation_mode": "casual_reply",
+      "context_usage": "none",
+      "task_type": "information_request",
+      "execution_fields": {
+        "calendar_action": {},
+        "task_action": {},
+        "memory_actions": [],
+        "profile_updates": {},
+        "account_updates": [],
+        "requested_outputs": []
+      }
+    }
+  },
+  {
+    "id": "continue_today",
+    "category": "continuation",
+    "user_input": "今天",
+    "expected": {
+      "conversation_mode": "continue_task",
+      "context_usage": "pending_approval"
+    }
+  },
+  {
+    "id": "continue_reschedule",
+    "category": "continuation",
+    "user_input": "改到3/12",
+    "expected": {
+      "conversation_mode": "continue_task",
+      "context_usage": "recent_task"
+    }
+  },
+  {
+    "id": "continue_choose_second",
+    "category": "continuation",
+    "user_input": "第二個",
+    "expected": {
+      "conversation_mode": "continue_task",
+      "context_usage": "pending_approval"
+    }
+  },
+  {
+    "id": "calendar_query_september",
+    "category": "calendar_query",
+    "user_input": "我9月有什麼行程",
+    "expected": {
+      "conversation_mode": "new_task",
+      "task_type": "action_prep",
+      "execution_fields": {
+        "calendar_action": {
+          "operation": "list_events"
+        },
+        "task_action": {}
+      }
+    }
+  },
+  {
+    "id": "task_query_today",
+    "category": "task_query",
+    "user_input": "我今天有什麼事情",
+    "expected": {
+      "conversation_mode": "new_task",
+      "task_type": "action_prep",
+      "execution_fields": {
+        "calendar_action": {},
+        "task_action": {
+          "operation": "list_tasks"
+        }
+      }
+    }
+  },
+  {
+    "id": "trip_plan_nagoya",
+    "category": "trip_planning",
+    "user_input": "安排6天5夜名古屋行程",
+    "expected": {
+      "conversation_mode": "new_task",
+      "task_type": "trip_planning",
+      "execution_fields": {
+        "calendar_action": {},
+        "task_action": {},
+        "memory_actions": [],
+        "requested_outputs": []
+      }
+    }
+  },
+  {
+    "id": "memory_save_email",
+    "category": "memory",
+    "user_input": "記住我常用 email 是 test@example.com",
+    "expected": {
+      "conversation_mode": "new_task",
+      "task_type": "action_prep",
+      "execution_fields": {
+        "memory_actions": [
+          "save_profile"
+        ]
+      }
+    }
+  },
+  {
+    "id": "file_export_pdf",
+    "category": "file_export",
+    "user_input": "幫我整理成 PDF",
+    "expected": {
+      "conversation_mode": "new_task",
+      "requested_outputs": [
+        "pdf"
+      ]
+    }
+  },
+  {
+    "id": "decline_google_text_only",
+    "category": "continuation",
+    "user_input": "先不用進行事曆，只要文字稿",
+    "expected": {
+      "conversation_mode": "continue_task",
+      "context_usage": "pending_approval"
+    }
+  },
+  {
+    "id": "calendar_query_next_month",
+    "category": "calendar_query",
+    "user_input": "下個月行程",
+    "expected": {
+      "conversation_mode": "new_task",
+      "task_type": "action_prep",
+      "execution_fields": {
+        "calendar_action": {
+          "operation": "list_events"
+        },
+        "task_action": {}
+      }
+    }
+  }
+]

@@ -1,5 +1,6 @@
 import json
 import uuid
+from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -9,6 +10,8 @@ from secretary_agent.utils import extract_json_object, normalize_bool
 
 
 class DifyAgentClient:
+    _PROMPT_PATH = Path(__file__).resolve().parent.parent / "dify" / "SYSTEM_PROMPT.md"
+
     def __init__(self, *, api_key: str, base_url: str, user_prefix: str):
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
@@ -49,51 +52,9 @@ class DifyAgentClient:
 
     def _build_prompt(self, *, user_goal: str, runtime_context: Dict[str, Any]) -> str:
         context_json = json.dumps(runtime_context, ensure_ascii=False, indent=2)
+        system_prompt = self._PROMPT_PATH.read_text(encoding="utf-8").strip()
         return (
-            "你是一位真正的 AI 秘書代理，負責把使用者目標轉成可執行任務，必要時用 Dify 內建工具搜尋、閱讀網頁或影片字幕。\n"
-            "請只輸出 JSON 物件，不要加任何說明文字。輸出欄位固定如下：\n"
-            "{\n"
-            '  "task_type": "information_request | research_and_compare | trip_planning | action_prep",\n'
-            '  "goal_summary": "string",\n'
-            '  "subtasks": ["string"],\n'
-            '  "needed_inputs": ["string"],\n'
-            '  "requires_approval": true,\n'
-            '  "approval_type": "missing_info | decision",\n'
-            '  "approval_prompt": "string",\n'
-            '  "draft_user_reply": "string",\n'
-            '  "final_reply": "string",\n'
-            '  "options": [{"title":"string","summary":"string","price":"string","link":"string"}],\n'
-            '  "recommendation": "string",\n'
-            '  "rationale": ["string"],\n'
-            '  "action_links": [{"label":"string","url":"string"}],\n'
-            '  "warnings": ["string"],\n'
-            '  "missing_info": ["string"],\n'
-            '  "profile_updates": {"key":"value"},\n'
-            '  "account_updates": [{"service_name":"string","login_identifier":"string","display_name":"string","oauth_provider":"string","session_available":false}],\n'
-            '  "memory_actions": ["save_profile | update_profile | forget_profile | save_account | forget_account"],\n'
-            '  "calendar_action": {"operation":"create_event | update_event | cancel_event | list_events","event_id":"string","summary":"string","description":"string","start":"ISO-8601","end":"ISO-8601"},\n'
-            '  "task_action": {"operation":"create_task | update_task | complete_task | list_tasks | delete_task","title":"string","notes":"string","due":"ISO-8601","task_id":"string"},\n'
-            '  "requested_outputs": ["txt | docx | pdf"],\n'
-            '  "document_title": "string"\n'
-            "}\n"
-            "規則：\n"
-            "1. 一律使用繁體中文。\n"
-            "2. 如果資訊不足，使用 needed_inputs/missing_info，並讓 approval_prompt 變成簡短追問。\n"
-            "3. 如果已經可以做出建議，final_reply 要是手機可讀的秘書式報告。\n"
-            "4. 如果需要使用者做選擇或確認，requires_approval=true。\n"
-            "5. action_links 只能放官方或可信賴站點的下一步連結。\n"
-            "6. profile_updates 只填可穩定記住的偏好。\n\n"
-            "6-1. account_updates 可放需要長期記住的會員帳號識別資料，例如常用 email 或會員編號，但不要放密碼、信用卡、OTP。\n"
-            "6-2. 若使用者要你記住、更新或忘記長期資料，請用 memory_actions、profile_updates、account_updates 表達。\n"
-            "6-3. 若任務是建立 Google Calendar 行程或 Google Tasks 提醒，請用 calendar_action 或 task_action 輸出結構化操作需求。\n"
-            "6-3-1. 若使用者是在查詢行程、日程、Calendar，請優先輸出 calendar_action={\"operation\":\"list_events\"}，不可只靠上下文摘要，也不可誤改成 task_action。\n"
-            "6-3-2. 若使用者是在查詢提醒、待辦、Tasks，請優先輸出 task_action={\"operation\":\"list_tasks\"}，不可只靠上下文摘要。\n"
-            "6-4. 網站自動操作到付款前仍屬下一階段功能；目前若使用者提出此需求，請在 final_reply 與 warnings 中清楚說明目前尚未啟用，且不要輸出 browser_request。\n\n"
-            "7. 如果使用者要求輸出成 Word、PDF、TXT 或檔案，請在 requested_outputs 明確列出格式。\n"
-            "8. document_title 要給出適合檔案命名的人類可讀標題。\n\n"
-            "9. 若使用者使用相對日期，例如今天、明天、後天、下週一，必須以目前執行上下文中的 current_datetime_local 與 current_timezone 為唯一基準，不可自行猜測其他日期。\n"
-            "10. 若使用者要求建立行程或提醒，calendar_action/task_action 中的日期時間必須與 relative date 解析結果一致。\n\n"
-            "11. 若使用者要求修改、延後、提前、取消剛剛建立的提醒或行程，請優先參考執行上下文中的 recent_service_artifacts，並在 task_action/calendar_action 中帶出對應的 task_id 或 event_id；若有多個可能目標，必須 requires_approval=true、approval_type=decision，先請使用者選擇；若無法可靠判定，再改成追問。\n\n"
+            f"{system_prompt}\n\n"
             f"使用者最新目標：{user_goal}\n"
             f"目前執行上下文：\n{context_json}"
         )

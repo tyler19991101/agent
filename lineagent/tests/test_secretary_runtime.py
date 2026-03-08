@@ -1,7 +1,7 @@
 import os
 import tempfile
 import unittest
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from secretary_agent.audio_transcriber import format_diarized_transcript, format_timestamp
 from secretary_agent.memory import SQLiteStore
@@ -579,7 +579,7 @@ class SecretaryRuntimeTest(unittest.TestCase):
         self.assertEqual(len(browser.calls), 0)
         self.assertIn("下一階段", self.messenger.pushes[0][1])
 
-    def test_calendar_query_overrides_planner_without_google_action(self):
+    def test_calendar_query_executes_dify_list_events_action(self):
         google = FakeGoogleClient(
             configured=True,
             events=[
@@ -594,7 +594,18 @@ class SecretaryRuntimeTest(unittest.TestCase):
             store=self.store,
             messenger=self.messenger,
             agent_client=FakeAgentClient(
-                [PlannerResult(task_type="trip_planning", final_reply="你目前近期的行程如下")]
+                [
+                    PlannerResult(
+                        task_type="action_prep",
+                        calendar_action={
+                            "operation": "list_events",
+                            "time_min": "2026-03-08T00:00:00+08:00",
+                            "time_max": "2026-03-15T00:00:00+08:00",
+                            "timezone": "Asia/Taipei",
+                        },
+                        final_reply="你近期的 Google 行程如下：",
+                    )
+                ]
             ),
             google_client=google,
             browser_automation=FakeBrowserAutomation(),
@@ -613,23 +624,23 @@ class SecretaryRuntimeTest(unittest.TestCase):
         self.assertIn("你近期的 Google 行程", self.messenger.pushes[0][1])
         self.assertIn("開會", self.messenger.pushes[0][1])
 
-    def test_calendar_query_overrides_wrong_task_list_plan(self):
+    def test_task_query_executes_dify_list_tasks_action(self):
         google = FakeGoogleClient(
             configured=True,
-            events=[
-                {
-                    "summary": "會議",
-                    "start": {"dateTime": "2026-03-10T15:00:00+08:00"},
-                }
-            ],
-            tasks=[{"title": "不該被回"}],
+            tasks=[{"title": "開會", "due": "2026-03-10T15:00:00+08:00", "status": "needsAction"}],
         )
         runtime = SecretaryRuntime(
             settings=FakeSettings(),
             store=self.store,
             messenger=self.messenger,
             agent_client=FakeAgentClient(
-                [PlannerResult(task_type="trip_planning", task_action={"operation": "list_tasks"}, final_reply="你目前近期的行程如下")]
+                [
+                    PlannerResult(
+                        task_type="action_prep",
+                        task_action={"operation": "list_tasks"},
+                        final_reply="你目前的提醒如下：",
+                    )
+                ]
             ),
             google_client=google,
             browser_automation=FakeBrowserAutomation(),
@@ -643,58 +654,10 @@ class SecretaryRuntimeTest(unittest.TestCase):
             session_available=True,
             metadata={"access_token": "fake", "refresh_token": "fake"},
         )
-        runtime.handle_inbound_message(self.inbound("我近期的行程有什麼", line_event_id="evt-calendar-query-2"))
+        runtime.handle_inbound_message(self.inbound("我目前有哪些提醒", line_event_id="evt-task-query"))
         runtime.process_next_run()
-        self.assertIn("你近期的 Google 行程", self.messenger.pushes[0][1])
-        self.assertIn("會議", self.messenger.pushes[0][1])
-        self.assertNotIn("待辦事項", self.messenger.pushes[0][1])
-
-    def test_calendar_query_supports_next_month_phrase(self):
-        runtime = SecretaryRuntime(
-            settings=FakeSettings(),
-            store=self.store,
-            messenger=self.messenger,
-            agent_client=FakeAgentClient([]),
-            google_client=FakeGoogleClient(configured=True),
-            browser_automation=FakeBrowserAutomation(),
-        )
-        action = runtime._build_calendar_query_action("下個月行程")
-        start = datetime.fromisoformat(action["time_min"])
-        end = datetime.fromisoformat(action["time_max"])
-        self.assertEqual(start.day, 1)
-        self.assertEqual(start.hour, 0)
-        self.assertEqual((end.year, end.month), ((start.year + 1, 1) if start.month == 12 else (start.year, start.month + 1)))
-
-    def test_calendar_query_supports_explicit_month_phrase(self):
-        runtime = SecretaryRuntime(
-            settings=FakeSettings(),
-            store=self.store,
-            messenger=self.messenger,
-            agent_client=FakeAgentClient([]),
-            google_client=FakeGoogleClient(configured=True),
-            browser_automation=FakeBrowserAutomation(),
-        )
-        action = runtime._build_calendar_query_action("查詢我9月的行程")
-        start = datetime.fromisoformat(action["time_min"])
-        end = datetime.fromisoformat(action["time_max"])
-        self.assertEqual(start.month, 9)
-        self.assertEqual(start.day, 1)
-        self.assertTrue(end > start)
-
-    def test_calendar_query_supports_recent_n_days_phrase(self):
-        runtime = SecretaryRuntime(
-            settings=FakeSettings(),
-            store=self.store,
-            messenger=self.messenger,
-            agent_client=FakeAgentClient([]),
-            google_client=FakeGoogleClient(configured=True),
-            browser_automation=FakeBrowserAutomation(),
-        )
-        action = runtime._build_calendar_query_action("我最近五天有什麼行程")
-        start = datetime.fromisoformat(action["time_min"])
-        end = datetime.fromisoformat(action["time_max"])
-        self.assertEqual(start.hour, 0)
-        self.assertEqual(end - start, timedelta(days=5))
+        self.assertIn("待辦事項", self.messenger.pushes[0][1])
+        self.assertIn("開會", self.messenger.pushes[0][1])
 
     def test_trip_planning_does_not_trigger_google_auth_for_itinerary_text_request(self):
         runtime = SecretaryRuntime(

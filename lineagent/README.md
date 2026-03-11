@@ -1,75 +1,42 @@
 # lineagent
 
-一個以 LINE 為入口的個人助理型 agent。  
-目前這個專案的核心目標不是做一個單純聊天機器人，而是做一個：
+一個以 LINE 為入口的個人助理型 agent。
 
-- 能理解自然語言目標
-- 能維持有限但可控的個人記憶
-- 能建立與查詢 Google Calendar / Google Tasks
-- 能處理語音、圖片、一般文字
-- 能把分析結果輸出成檔案
-- 能把 AI 理解和後端執行分離
+這個專案的重點不是做一個只能聊天的 bot，而是做一個能把「自然語言理解」和「後端執行」清楚分離的助理系統：
 
-整體架構採用：
+- 使用者在 LINE 直接輸入需求
+- `Dify` 作為大腦，負責理解意圖、分類任務、判斷是否需要上下文、決定是否要觸發後端動作
+- `Python backend` 作為執行器，負責真的去執行 Google、記憶、檔案輸出、語音與圖片處理
 
-- `Dify`：大腦，負責理解、分類、判斷、追問、產出結構化 JSON contract
-- `Python backend`：執行器，負責 LINE webhook、SQLite、Google API、檔案生成、圖片/語音暫存與清理
-- `LINE`：主要使用者介面
+## 專案特色
 
-## 1. 專案目的
+### 1. Dify 是大腦，backend 是執行器
 
-這個專案要解的不是「讓 AI 能回話」，而是讓它逐步成為一個可用的助理系統。
+本專案刻意避免把後端寫成龐大的 NLP parser。
 
-目前已聚焦在以下幾類能力：
+整體設計是：
 
-- 個人助理
-  - 建立提醒事項
-  - 建立 / 查詢 / 修改 / 刪除 Google 行程
-  - 建立 / 查詢 / 修改 / 完成 / 刪除 Google Tasks
-- 長期個人記憶
-  - 記住常用 email、出發地、人數、地址、帳號識別
-  - 後續任務可重用這些資料
-- 多模態輸入
-  - 文字
-  - 語音
-  - 圖片
-- 分析輸出
-  - 純文字回覆
-  - `txt`
-  - `docx`
-  - `pdf`
+- `Dify`
+  - 理解自然語言
+  - 區分新任務 / 舊任務續接 / 閒聊
+  - 判斷是否要建立提醒、查 Google 行程、寫入記憶、輸出檔案
+  - 輸出固定 JSON contract
+- `backend`
+  - 驗證 contract
+  - 執行 Google Calendar / Google Tasks / SQLite / 檔案生成
+  - 做少量安全 guardrail
+  - 提供 user-safe fallback
 
-刻意暫不做：
+這讓系統可以逐步優化大腦，而不必把每個自然語言規則都硬寫在後端。
 
-- 全自動網站操作
-- 加入購物車 / 訂票 / 訂房到付款前
-- 自動付款
-- 文件上傳後的 PDF / DOCX 內容分析
+### 2. Contract-first 架構
 
-## 2. 架構原則
+Dify 不直接控制程式，而是輸出固定結構化欄位，再由 backend 執行。
 
-### 2.1 Dify 是大腦，backend 是執行器
+目前核心欄位包括：
 
-本專案刻意避免把後端寫成一個越來越大的 NLP parser。  
-自然語言理解應該主要由 Dify 完成，後端只做：
-
-- schema validation
-- execution guardrail
-- backend action execution
-- user-safe fallback
-
-也就是：
-
-- Dify 負責回答：「這句話是什麼意圖？要不要用上下文？要不要執行 Google / 記憶 / 檔案輸出？」
-- backend 負責回答：「既然你決定要做，那我幫你真的去做」
-
-### 2.2 Contract-first
-
-Dify 不直接驅動程式碼。  
-它只輸出固定 JSON contract，後端只相信結構化欄位。
-
-例如：
-
+- `conversation_mode`
+- `context_usage`
 - `calendar_action`
 - `task_action`
 - `memory_actions`
@@ -77,164 +44,114 @@ Dify 不直接驅動程式碼。
 - `account_updates`
 - `requested_outputs`
 
-這樣的好處：
+這個設計的好處是：
 
-- prompt 可以逐步優化
-- 後端執行邏輯穩定
-- regression 容易測
-- 真實錯誤可以回灌成題庫
+- Dify prompt 可以獨立優化
+- backend 邏輯更穩定
+- 可做固定驗收題庫
+- 真實錯誤可逐步回灌
 
-### 2.3 小步迭代，不靠大量人工測
+### 3. 可控的長期個人記憶
 
-優化策略是：
+本專案不是把所有對話都丟給模型記住，而是用本地 SQLite 建立可控記憶層。
 
-1. 固定驗收題庫
-2. 真實錯誤回灌
-3. 小步 contract 優化
-4. 後端只保留少量 deterministic guardrail
+目前記憶分成：
 
-## 3. 專案結構
+- `conversation_history`
+  - 短期對話上下文
+- `user_profiles`
+  - 常用 email、出發地、人數、地址等穩定偏好
+- `connected_accounts`
+  - Google 或其他服務帳號識別
+- `artifacts / image_assets / pending_approvals`
+  - 任務產物、圖片索引、待確認流程
 
-```text
-lineagent/
-├── bot.py
-├── run_agentbot.sh
-├── .env.bot.example
-├── README.md
-├── dify/
-│   ├── README.md
-│   └── SYSTEM_PROMPT.md
-├── secretary_agent/
-│   ├── admin_notifier.py
-│   ├── artifact_generator.py
-│   ├── audio_transcriber.py
-│   ├── config.py
-│   ├── dify_client.py
-│   ├── google_workspace.py
-│   ├── image_storage.py
-│   ├── logging_utils.py
-│   ├── memory.py
-│   ├── models.py
-│   ├── runtime.py
-│   ├── transport_line.py
-│   └── utils.py
-├── scripts/
-│   └── run_golden_set.py
-├── tests/
-│   ├── golden_set.json
-│   ├── test_dify_client.py
-│   ├── test_golden_set.py
-│   └── test_secretary_runtime.py
-├── storage/
-│   └── images/
-├── output/
-│   └── doc/
-└── logs/
-```
+也就是說，模型決定「要不要記」，但真正的資料是由 backend 存進本地資料庫。
 
-## 4. 核心模組
+### 4. Google 助理能力
 
-### 4.1 `bot.py`
+目前已經聚焦在可實際使用的個人助理能力：
 
-Flask + LINE webhook 入口。
+- Google Calendar
+  - 建立行程
+  - 查詢行程
+  - 修改行程
+  - 刪除 / 取消行程
+- Google Tasks
+  - 建立提醒
+  - 查詢提醒
+  - 修改提醒
+  - 完成提醒
+  - 刪除提醒
 
-職責：
+這讓它不只是會「告訴你怎麼做」，而是真的能幫你把提醒或行程建立進你的 Google 系統。
 
-- 接收 LINE 訊息
-- 分流文字 / 圖片 / 音訊 / 檔案 / 位置
-- 立即 ACK
-- 把實際工作丟給 runtime
-
-### 4.2 `secretary_agent/runtime.py`
-
-整個後端執行核心。
-
-職責：
-
-- 建立 task run
-- 背景 worker 處理 queue
-- 呼叫 Dify planner
-- 驗證 planner contract
-- 執行 Google / memory / artifact / image upload
-- push final result
-- user-safe error handling
-
-### 4.3 `secretary_agent/dify_client.py`
-
-Dify API client。
-
-職責：
-
-- 呼叫 chat planner
-- 解析 Dify 回傳的 JSON
-- 上傳圖片檔到 Dify files endpoint
-
-重要設計：
-
-- Dify `INSTRUCTION` 是唯一 prompt source of truth
-- 本地不再把完整 system prompt 注入 query
-- 本地只傳：
-  - 使用者最新目標
-  - runtime context
-
-### 4.4 `secretary_agent/memory.py`
-
-SQLite persistence layer。
-
-負責：
-
-- 對話歷史
-- task runs
-- task steps
-- artifacts
-- user profile
-- connected accounts
-- pending approvals
-- image asset metadata
-
-### 4.5 `secretary_agent/google_workspace.py`
-
-Google Calendar / Tasks integration。
+### 5. 多模態輸入
 
 目前支援：
 
-- Google OAuth
-- create / update / cancel / list calendar event
-- create / update / complete / delete / list task
+- 文字
+- 語音
+- 圖片
 
-### 4.6 `secretary_agent/audio_transcriber.py`
+語音會先經過：
 
-語音轉文字。
+- LINE 音訊下載
+- AssemblyAI 轉錄
+- 語者分離（speaker diarization）
 
-目前使用：
+圖片則會先經過：
 
-- AssemblyAI
-- speaker diarization
+- LINE 圖片下載
+- 本地短期快取
+- 上傳 Dify vision 分析
 
-### 4.7 `secretary_agent/image_storage.py`
+所以同一個助理架構，可以處理文字、語音與圖片三種主要輸入型態。
 
-圖片暫存與清理。
+### 6. 檔案輸出
 
-設計原則：
-
-- 圖片 binary 不進 SQLite
-- 只落地到本地磁碟
-- SQLite 只存 metadata
-- 預設保留 7 天
-
-### 4.8 `secretary_agent/artifact_generator.py`
-
-輸出檔案生成器。
-
-目前支援：
+除了文字回覆之外，系統也能把結果產生為：
 
 - `txt`
 - `docx`
 - `pdf`
 
-## 5. 資料流
+適合拿來做：
 
-### 5.1 文字訊息
+- 會議重點整理
+- 報告摘要
+- 行程表
+- 結構化說明文件
+
+### 7. 真實系統導向的錯誤處理
+
+這個專案的設計目標不是把錯誤原文丟給使用者，而是：
+
+- user 看到安全訊息
+- 後台 log 留下完整 trace
+- 管理者可收到異常通知
+
+這讓系統比較接近真正可維運的 assistant，而不是單純 demo bot。
+
+## 整體架構
+
+```mermaid
+flowchart LR
+    U["LINE 使用者"] --> L["LINE Messaging API"]
+    L --> B["bot.py / Flask webhook"]
+    B --> R["runtime.py"]
+    R --> D["Dify planner"]
+    R --> M["SQLite memory"]
+    R --> G["Google Calendar / Tasks"]
+    R --> A["Artifact generator"]
+    R --> S["Audio transcriber"]
+    R --> I["Image storage + Dify vision upload"]
+    R --> P["LINE push / reply"]
+```
+
+## 核心資料流
+
+### 1. 文字任務流程
 
 ```mermaid
 flowchart TD
@@ -245,296 +162,113 @@ flowchart TD
     D --> F["背景 worker"]
     F --> G["呼叫 Dify planner"]
     G --> H["回傳 JSON contract"]
-    H --> I["backend 執行 action / 組結果"]
+    H --> I["backend 執行 action"]
     I --> J["push final reply"]
 ```
 
-### 5.2 語音訊息
+### 2. 語音流程
 
 ```mermaid
 flowchart TD
-    A["LINE 使用者傳語音"] --> B["bot.py ACK: 正在轉錄"]
-    B --> C["下載音訊"]
+    A["LINE 使用者傳語音"] --> B["先回覆：正在轉錄"]
+    B --> C["下載 LINE 音訊"]
     C --> D["AssemblyAI 轉錄 + diarization"]
-    D --> E["轉成文字 prompt"]
-    E --> F["runtime 建立 task"]
-    F --> G["Dify planner"]
-    G --> H["backend 執行"]
-    H --> I["push final reply"]
+    D --> E["轉成文字內容"]
+    E --> F["送進 Dify planner"]
+    F --> G["backend 執行對應 action"]
+    G --> H["push final result"]
 ```
 
-### 5.3 圖片訊息
+### 3. 圖片流程
 
 ```mermaid
 flowchart TD
-    A["LINE 使用者傳圖片"] --> B["bot.py ACK: 正在分析"]
-    B --> C["從 LINE 下載圖片 binary"]
-    C --> D["本地 storage/images/ 快取"]
-    D --> E["SQLite 記 image_assets metadata"]
-    E --> F["runtime 建立 task"]
-    F --> G["上傳圖片到 Dify files"]
-    G --> H["Dify vision + user goal 分析"]
-    H --> I["backend 組結果"]
+    A["LINE 使用者傳圖片"] --> B["先回覆：正在分析圖片"]
+    B --> C["下載圖片 binary"]
+    C --> D["存本地 7 天快取"]
+    D --> E["寫入 image_assets metadata"]
+    E --> F["上傳圖片到 Dify"]
+    F --> G["圖片 + 文字一起送進 planner"]
+    G --> H["回傳同一份 JSON contract"]
+    H --> I["backend 執行 / 組結果"]
     I --> J["push final reply"]
 ```
 
-### 5.4 Google 助理流程
+### 4. Google 助理流程
 
 ```mermaid
 flowchart TD
-    A["使用者要求提醒/行程"] --> B["Dify 輸出 calendar_action/task_action"]
-    B --> C{"Google 已授權?"}
-    C -- 否 --> D["建立 OAuth state"]
-    D --> E["推送授權連結"]
-    C -- 是 --> F["直接呼叫 Google API"]
-    E --> G["使用者完成 Google OAuth"]
-    G --> F
-    F --> H["建立/查詢/更新結果"]
-    H --> I["push final reply"]
+    A["使用者要求提醒 / 行程"] --> B["Dify 輸出 calendar_action 或 task_action"]
+    B --> C{"已綁定 Google?"}
+    C -- 否 --> D["回傳授權連結"]
+    C -- 是 --> E["backend 呼叫 Google API"]
+    E --> F["建立 / 查詢 / 修改 / 刪除"]
+    F --> G["回覆結果給使用者"]
 ```
 
-## 6. Dify contract 設計
-
-目前重點欄位：
-
-- `conversation_mode`
-  - `new_task`
-  - `continue_task`
-  - `casual_reply`
-- `context_usage`
-  - `none`
-  - `recent_task`
-  - `pending_approval`
-  - `quoted_message`
-- `task_type`
-  - `information_request`
-  - `research_and_compare`
-  - `trip_planning`
-  - `action_prep`
-- `calendar_action`
-- `task_action`
-- `memory_actions`
-- `profile_updates`
-- `account_updates`
-- `requested_outputs`
-- `document_title`
-
-重要原則：
+## 專案核心模組
 
-- Dify 只負責判斷與輸出 contract
-- `final_reply` 不會直接觸發 backend action
-- 所有未使用 execution field 必須為空
-- 旅遊「行程」不等於 Google Calendar event
-- casual reply 不得續接舊任務
-
-## 7. 長期記憶設計
-
-目前是本地 SQLite 長期記憶，不依賴 Dify 自己保存。
-
-分成三類：
-
-1. `profile`
-- 常用 email
-- 常用出發地
-- 人數
-- 地址
-- 偏好
-
-2. `connected_accounts`
-- Google
-- 其他帳號識別
-
-3. `conversation/task context`
-- 最近對話
-- recent service artifacts
-- pending approval
-
-原則：
-
-- 記帳號識別，不記密碼
-- 不存信用卡
-- 不存 OTP
-- 不把一次性任務資訊寫成長期記憶
+### `bot.py`
 
-## 8. 目前已完成功能
+LINE webhook 入口，負責：
 
-### 已完成
+- 接收訊息
+- 區分文字 / 音訊 / 圖片 / 檔案 / 位置
+- 立即 ACK
+- 把重工作交給 runtime
 
-- LINE webhook 接入
-- Dify contract-first planner 架構
-- 文字問答 / 一般研究
-- 旅遊規劃
-- Google Calendar
-- Google Tasks
-- 長期個人記憶
-- 語音轉文字
-- 圖片上傳與 vision 分析
-- 檔案輸出
-- 管理告警 LINE 通知
-- log 按重啟分檔
-- golden set regression runner
+### `secretary_agent/runtime.py`
 
-### 已刻意關閉 / 未開放
+整個系統的執行核心，負責：
 
-- browser automation
-- cart / checkout / payment
-- PDF / DOCX 文件上傳分析
-- 圖片長期知識庫
-- 以圖搜圖
+- task 建立與排程
+- Dify planner 呼叫
+- contract 驗證
+- Google / memory / artifact / image / audio 執行
+- 最終回覆與錯誤處理
 
-## 9. 目前限制
+### `secretary_agent/dify_client.py`
 
-### 9.1 圖片
+負責和 Dify 溝通：
 
-- 只做短期快取
-- 不做永久圖庫
-- 不做跨任務圖片檢索
+- 傳送使用者最新目標與 runtime context
+- 接收結構化 JSON
+- 上傳圖片到 Dify files endpoint
 
-### 9.2 文件
+### `secretary_agent/memory.py`
 
-- 目前沒有文件分析
-- user 上傳 PDF / DOCX 會被明確告知尚未開放文件分析
+負責本地記憶與持久化：
 
-### 9.3 Dify planner
+- conversation history
+- user profile
+- connected accounts
+- task runs / task steps
+- artifacts / image assets / pending approvals
 
-- 已經是主大腦，但仍需要少量 backend guardrail
-- 不是完全無 fallback 的自由 agent
+### `secretary_agent/google_workspace.py`
 
-### 9.4 LINE 配額
+Google Calendar / Google Tasks 整合層。
 
-- background push 受 LINE 月額度限制
-- 超額時 webhook/reply 可能還活著，但 push 會失敗
+### `secretary_agent/audio_transcriber.py`
 
-## 10. 設定
+語音轉文字與 speaker diarization。
 
-請建立：
+### `secretary_agent/image_storage.py`
 
-- `.env.bot`
+圖片快取與清理。
 
-至少需要：
+### `secretary_agent/artifact_generator.py`
 
-```bash
-LINE_CHANNEL_ACCESS_TOKEN=...
-LINE_CHANNEL_SECRET=...
-DIFY_API_KEY=...
-```
+文字、Word、PDF 輸出。
 
-常用設定還包括：
+## 設計特色總結
 
-```bash
-DIFY_BASE_URL=https://api.dify.ai/v1
-PUBLIC_BASE_URL=https://your-domain
-BOT_DB_PATH=/abs/path/to/bot_memory.sqlite3
-ARTIFACT_OUTPUT_DIR=/abs/path/to/output/doc
-IMAGE_STORAGE_DIR=/abs/path/to/storage/images
-IMAGE_RETENTION_DAYS=7
-ASSEMBLYAI_API_KEY=...
-GOOGLE_CLIENT_ID=...
-GOOGLE_CLIENT_SECRET=...
-GOOGLE_REDIRECT_URI=https://your-domain/auth/google/callback
-ADMIN_ALERT_LINE_USER_ID=Uxxxxxxxx
-```
+這個專案的特色不在於「做很多功能」，而在於它的架構選擇：
 
-## 11. 啟動方式
+- 用 `LINE` 做使用者介面
+- 用 `Dify` 當主要大腦
+- 用 `Python backend` 做執行器
+- 用 `SQLite` 做可控記憶
+- 用固定 JSON contract 把理解與執行分開
 
-```bash
-cd /Users/linxuanli/Library/Mobile\ Documents/com~apple~CloudDocs/Code/lineagent
-./run_agentbot.sh
-```
-
-會啟動：
-
-- Flask bot
-- ngrok
-
-log 位置：
-
-- `logs/bot.log`
-- `logs/ngrok.log`
-
-每次重啟會自動輪替成：
-
-- `bot_YYYYMMDD_HHMMSS.log`
-- `ngrok_YYYYMMDD_HHMMSS.log`
-
-## 12. 測試
-
-### 單元測試
-
-```bash
-python3 -m unittest tests.test_dify_client tests.test_secretary_runtime tests.test_golden_set
-```
-
-### 語法檢查
-
-```bash
-python3 -m py_compile bot.py secretary_agent/*.py tests/test_dify_client.py tests/test_secretary_runtime.py tests/test_golden_set.py
-```
-
-### Golden set regression
-
-```bash
-python3 scripts/run_golden_set.py
-```
-
-輸出會存到：
-
-- `reports/golden_set_report_YYYYMMDD_HHMMSS.json`
-
-## 13. 建議的持續優化方式
-
-這個專案不適合靠「大量人工亂測」來長期維護。  
-比較對的方式是：
-
-1. 維護固定題庫
-2. 把真實 user 錯誤回灌成測試
-3. 小步修 prompt contract
-4. 後端只保留最小 guardrail
-
-建議優先順序：
-
-1. 上下文續接穩定
-2. Google 行程 / 提醒查詢與修改穩定
-3. execution field 不污染
-4. 記憶寫入更保守
-5. 多模態任務持續穩定
-
-## 14. 後續建議
-
-我認為最值得補上的下一批能力是：
-
-1. 文件分析
-- PDF
-- DOCX
-- 先本地抽文字，再送 Dify
-
-2. 圖片功能完善
-- 多張圖片同時分析
-- 圖片搭配文字問答
-- 更細的圖片錯誤分類
-
-3. 管理維運
-- 失敗類型儀表板
-- LINE + email 雙通道告警
-- 更完整的 golden set scenario runner
-
-4. 記憶系統收斂
-- 更細的 profile schema
-- 更保守的記憶寫入規則
-- 依任務類型選擇性注入記憶
-
-## 15. 一句話總結
-
-這個專案目前是一個：
-
-**以 LINE 為入口、以 Dify 為大腦、以 Python backend 為執行器的個人助理型 agent。**
-
-它已經具備：
-
-- 多模態輸入
-- Google 助理能力
-- 長期記憶
-- 檔案輸出
-- regression 測試基礎
-
-但仍處於「可用、可擴充、持續收斂」的工程化階段，而不是最終完成版。
+所以它不是一個單純的 bot，而是一個正在往「真正可用的助理系統」演進的基礎架構。

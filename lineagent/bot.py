@@ -270,7 +270,7 @@ def on_audio_message(event: MessageEvent):
 
 @handler.add(MessageEvent, message=FileMessageContent)
 def on_file_message(event: MessageEvent):
-    _start_media_processing(event)
+    _handle_file_message(event)
 
 
 @handler.add(MessageEvent, message=ImageMessageContent)
@@ -312,6 +312,30 @@ def _start_media_processing(event: MessageEvent):
         "已收到語音，正在轉錄並整理重點，完成後我會主動推送給你。",
     )
     threading.Thread(target=_handle_media_message, args=(event,), daemon=True).start()
+
+
+def _handle_file_message(event: MessageEvent):
+    message_id = getattr(event.message, "id", "")
+    source_id = get_push_target_id(event.source)
+    user_id = getattr(event.source, "user_id", None)
+    filename, mime_type = infer_media_metadata(event.message)
+    logger.info(
+        format_log_event(
+            "file_message_received",
+            message_id=message_id,
+            filename=filename,
+            mime=mime_type,
+            source_id=source_id,
+            user_id=user_id,
+        )
+    )
+    if mime_type.startswith("audio/"):
+        _start_media_processing(event)
+        return
+    messenger.reply_text(
+        event.reply_token,
+        "目前還沒有開放文件分析功能，請先改傳圖片或音訊，或稍後再試。",
+    )
 
 
 def _handle_media_message(event: MessageEvent):

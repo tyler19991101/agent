@@ -282,6 +282,7 @@ class SecretaryRuntime:
             )
             self.store.prune_short_context(run.memory_key, self.settings.short_context_ttl_days)
             context = self.store.build_runtime_context(run.id, run.memory_key)
+            self._maybe_attach_recent_image_context(run, context)
             current_local = datetime.now().astimezone()
             context["current_datetime_local"] = current_local.isoformat()
             context["current_date_local"] = current_local.date().isoformat()
@@ -467,6 +468,29 @@ class SecretaryRuntime:
     def _build_planning_goal(self, user_goal: str, context: Dict[str, Any]) -> str:
         if context.get("image_assets") and not user_goal.strip():
             return "請先做通用看圖分析，說明圖片內容、可提取的重點，以及是否需要我再補充用途。"
+        recent_image_summary = context.get("recent_image_summary")
+        if recent_image_summary and user_goal.strip():
+            summary_text = str(recent_image_summary.get("summary", "")).strip()
+            visible_objects = recent_image_summary.get("visible_objects") or []
+            visible_text = recent_image_summary.get("visible_text") or []
+            scene_or_context = str(recent_image_summary.get("scene_or_context", "")).strip()
+            suggested_followups = recent_image_summary.get("suggested_followups") or []
+            lines = [
+                f"使用者最新目標：{user_goal}",
+                "補充上下文：這則訊息很可能是在追問剛剛上傳的圖片。",
+                "請優先根據已存在的圖片基礎分析摘要回答；只有當摘要不足以回答時，才再結合原圖做更細的分析。",
+            ]
+            if summary_text:
+                lines.append(f"圖片摘要：{summary_text}")
+            if visible_objects:
+                lines.append("可見物件：" + "、".join(str(item) for item in visible_objects[:10]))
+            if visible_text:
+                lines.append("可辨識文字：" + "、".join(str(item) for item in visible_text[:10]))
+            if scene_or_context:
+                lines.append(f"場景/情境：{scene_or_context}")
+            if suggested_followups:
+                lines.append("可延伸追問：" + "、".join(str(item) for item in suggested_followups[:6]))
+            return "\n".join(lines)
         artifacts = context.get("artifacts", [])
         approval_responses = [
             str(item.get("content", "")).strip()
@@ -582,17 +606,183 @@ class SecretaryRuntime:
         image_assets = self.store.get_image_assets_for_run(run_id)
         if not image_assets:
             return
-        summary = {
-            "task_type": plan.task_type,
-            "goal_summary": plan.goal_summary,
-            "final_reply": final_text[:2000],
-        }
+        summary = self._build_image_analysis_summary(plan, final_text)
         for row in image_assets:
             self.store.update_image_asset_status(
                 int(row["id"]),
                 status="analyzed",
                 analysis_summary=summary,
             )
+
+    def _maybe_attach_recent_image_context(self, run: TaskRun, runtime_context: Dict[str, Any]) -> None:
+        current_image_assets = runtime_context.get("image_assets") or []
+        if current_image_assets:
+            summary = self._extract_recent_image_summary(current_image_assets)
+            if summary:
+                runtime_context["recent_image_summary"] = summary
+            return
+        recent_image_assets = runtime_context.get("recent_image_assets") or []
+        if not recent_image_assets:
+            return
+        if not self._looks_like_image_followup(run.user_goal):
+            return
+        selected_asset = dict(recent_image_assets[0])
+        summary = self._extract_recent_image_summary([selected_asset])
+        if summary:
+            runtime_context["recent_image_summary"] = summary
+            self.logger.info(
+                format_log_event(
+                    "recent_image_summary_attached",
+                    run_id=run.id,
+                    memory_key=run.memory_key,
+                    image_asset_id=selected_asset.get("id", ""),
+                )
+            )
+        if self._needs_original_image_review(run.user_goal, summary):
+            runtime_context["image_assets"] = [selected_asset]
+            self.logger.info(
+                format_log_event(
+                    "recent_image_context_attached",
+                    run_id=run.id,
+                    memory_key=run.memory_key,
+                    image_asset_id=selected_asset.get("id", ""),
+                )
+            )
+
+    @staticmethod
+    def _looks_like_image_followup(text: str) -> bool:
+        normalized = "".join(text.strip().lower().split())
+        if not normalized:
+            return False
+        image_followup_tokens = (
+            "這是什麼",
+            "這個是什麼",
+            "這張是什麼",
+            "這張圖",
+            "這張照片",
+            "這個",
+            "這張",
+            "幫我看",
+            "你覺得這是什麼",
+            "看一下這個",
+            "看一下這張",
+            "圖裡",
+            "照片裡",
+            "圖片裡",
+            "這是啥",
+            "這看起來",
+            "上面有",
+            "幫我判斷",
+            "幫我辨識",
+        )
+        return any(token in normalized for token in image_followup_tokens)
+
+    @staticmethod
+    def _extract_recent_image_summary(image_assets: List[Dict[str, Any]]) -> Dict[str, Any]:
+        for asset in image_assets:
+            summary = asset.get("analysis_summary")
+            if isinstance(summary, dict) and summary:
+                return summary
+        return {}
+
+    @staticmethod
+    def _needs_original_image_review(user_goal: str, analysis_summary: Dict[str, Any]) -> bool:
+        normalized = "".join(user_goal.strip().lower().split())
+        if not normalized:
+            return False
+        detail_tokens = (
+            "文字",
+            "字",
+            "英文",
+            "內容",
+            "細節",
+            "標示",
+            "哪家",
+            "品牌",
+            "型號",
+            "價格",
+            "店名",
+            "地址",
+            "電話",
+            "成分",
+            "日期",
+            "左上角",
+            "右上角",
+            "下面",
+            "上面",
+            "讀",
+            "辨識",
+            "看清楚",
+        )
+        if not any(token in normalized for token in detail_tokens):
+            return False
+        visible_text = analysis_summary.get("visible_text") if isinstance(analysis_summary, dict) else []
+        return not bool(visible_text)
+
+    def _build_image_analysis_summary(self, plan: PlannerResult, final_text: str) -> Dict[str, Any]:
+        summary_text = (plan.final_reply or plan.draft_user_reply or final_text or "").strip()[:2000]
+        return {
+            "task_type": plan.task_type,
+            "goal_summary": plan.goal_summary,
+            "summary": summary_text,
+            "visible_objects": self._extract_visible_objects(summary_text),
+            "visible_text": self._extract_visible_text(summary_text),
+            "scene_or_context": self._extract_scene_or_context(summary_text, plan.goal_summary),
+            "suggested_followups": self._build_image_followup_suggestions(summary_text),
+            "final_reply": final_text[:2000],
+        }
+
+    @staticmethod
+    def _extract_visible_objects(summary_text: str) -> List[str]:
+        candidates = []
+        for token in (
+            "人",
+            "人物",
+            "餐桌",
+            "桌面",
+            "杯子",
+            "碗",
+            "飲料",
+            "食物",
+            "手機",
+            "文件",
+            "收據",
+            "螢幕",
+            "店面",
+            "包裝",
+            "招牌",
+        ):
+            if token in summary_text and token not in candidates:
+                candidates.append(token)
+        return candidates[:8]
+
+    @staticmethod
+    def _extract_visible_text(summary_text: str) -> List[str]:
+        if "可辨識文字" in summary_text:
+            trailing = summary_text.split("可辨識文字", 1)[1]
+            parts = [part.strip(" ：:，,。") for part in trailing.replace("\n", " ").split("、")]
+            return [part for part in parts if part][:8]
+        return []
+
+    @staticmethod
+    def _extract_scene_or_context(summary_text: str, goal_summary: str) -> str:
+        for marker in ("看起來是", "像是", "場景是", "內容是"):
+            if marker in summary_text:
+                return summary_text.split(marker, 1)[1].split("。", 1)[0].strip()
+        return goal_summary.strip()
+
+    @staticmethod
+    def _build_image_followup_suggestions(summary_text: str) -> List[str]:
+        suggestions = [
+            "幫我辨識圖片中的重點物件",
+            "幫我讀出圖片裡的文字",
+            "幫我整理這張圖的重點",
+        ]
+        if any(token in summary_text for token in ("食物", "飲料", "餐桌", "菜單")):
+            suggestions.append("幫我判斷這可能是什麼餐點或飲品")
+        if any(token in summary_text for token in ("文件", "收據", "文字")):
+            suggestions.append("幫我把圖片內容整理成條列重點")
+        return suggestions[:5]
 
     def _maybe_cleanup_expired_image_assets(self) -> None:
         now = time.time()

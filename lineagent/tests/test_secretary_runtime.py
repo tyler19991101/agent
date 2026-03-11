@@ -412,6 +412,166 @@ class SecretaryRuntimeTest(unittest.TestCase):
             row = conn.execute("SELECT status FROM image_assets WHERE id = ?", (image_asset_id,)).fetchone()
         self.assertEqual(row["status"], "deleted")
 
+    def test_runtime_updates_image_analysis_summary_with_structured_fields(self):
+        image_dir = os.path.join(self.tempdir.name, "images")
+        storage = ImageStorageManager(base_dir=image_dir, retention_days=7)
+        saved = storage.save_image(message_id="img-structured", image_bytes=b"\x89PNG\r\n\x1a\nimg")
+        run_id, _ = self.store.create_task_run(
+            memory_key="user:U123",
+            user_goal="請分析圖片",
+            normalized_goal="請分析圖片",
+            source_payload={},
+            external_event_id="evt-img-structured",
+        )
+        image_asset_id = self.store.create_image_asset(
+            memory_key="user:U123",
+            message_id="img-structured",
+            sha256=saved.sha256,
+            mime_type=saved.mime_type,
+            size_bytes=saved.size_bytes,
+            path=saved.path,
+            expires_at=saved.expires_at,
+        )
+        self.store.attach_image_assets_to_run(run_id, [image_asset_id])
+
+        runtime = SecretaryRuntime(
+            settings=FakeSettings(),
+            store=self.store,
+            messenger=self.messenger,
+            agent_client=FakeAgentClient([]),
+            google_client=FakeGoogleClient(),
+            browser_automation=FakeBrowserAutomation(),
+        )
+        runtime._update_image_analysis_summary(
+            run_id,
+            PlannerResult(
+                task_type="information_request",
+                goal_summary="通用看圖分析",
+                final_reply="畫面中可見餐桌、杯子與多個飲品，像是咖啡廳桌面場景。",
+            ),
+            "畫面中可見餐桌、杯子與多個飲品，像是咖啡廳桌面場景。",
+        )
+
+        context = self.store.build_runtime_context(run_id, "user:U123")
+        summary = context["image_assets"][0]["analysis_summary"]
+        self.assertIn("summary", summary)
+        self.assertIn("visible_objects", summary)
+        self.assertIn("visible_text", summary)
+        self.assertIn("scene_or_context", summary)
+        self.assertIn("suggested_followups", summary)
+        self.assertEqual(summary["task_type"], "information_request")
+
+    def test_recent_image_followup_uses_summary_without_reupload_when_detail_not_needed(self):
+        image_dir = os.path.join(self.tempdir.name, "images")
+        storage = ImageStorageManager(base_dir=image_dir, retention_days=7)
+        saved = storage.save_image(message_id="img-summary", image_bytes=b"\x89PNG\r\n\x1a\nimg")
+        previous_run_id, _ = self.store.create_task_run(
+            memory_key="user:U123",
+            user_goal="",
+            normalized_goal="",
+            source_payload={},
+            external_event_id="evt-img-summary",
+        )
+        image_asset_id = self.store.create_image_asset(
+            memory_key="user:U123",
+            message_id="img-summary",
+            sha256=saved.sha256,
+            mime_type=saved.mime_type,
+            size_bytes=saved.size_bytes,
+            path=saved.path,
+            expires_at=saved.expires_at,
+        )
+        self.store.attach_image_assets_to_run(previous_run_id, [image_asset_id])
+        self.store.update_image_asset_status(
+            image_asset_id,
+            status="analyzed",
+            analysis_summary={
+                "summary": "一張餐桌上有幾杯飲品。",
+                "visible_objects": ["餐桌", "飲品", "杯子"],
+                "visible_text": [],
+                "scene_or_context": "咖啡廳桌面",
+                "suggested_followups": ["幫我判斷這是什麼飲料"],
+            },
+        )
+
+        current_run_id, _ = self.store.create_task_run(
+            memory_key="user:U123",
+            user_goal="你覺得這是什麼",
+            normalized_goal="你覺得這是什麼",
+            source_payload={},
+            external_event_id="evt-img-followup",
+        )
+        runtime = SecretaryRuntime(
+            settings=FakeSettings(),
+            store=self.store,
+            messenger=self.messenger,
+            agent_client=FakeAgentClient([]),
+            google_client=FakeGoogleClient(),
+            browser_automation=FakeBrowserAutomation(),
+        )
+        current_run = runtime.store.get_task_run(current_run_id)
+        context = self.store.build_runtime_context(current_run_id, "user:U123")
+        runtime._maybe_attach_recent_image_context(current_run, context)
+
+        self.assertIn("recent_image_summary", context)
+        self.assertFalse(context.get("image_assets"))
+
+    def test_recent_image_followup_reuses_original_image_for_detail_question(self):
+        image_dir = os.path.join(self.tempdir.name, "images")
+        storage = ImageStorageManager(base_dir=image_dir, retention_days=7)
+        saved = storage.save_image(message_id="img-detail", image_bytes=b"\x89PNG\r\n\x1a\nimg")
+        previous_run_id, _ = self.store.create_task_run(
+            memory_key="user:U123",
+            user_goal="",
+            normalized_goal="",
+            source_payload={},
+            external_event_id="evt-img-detail",
+        )
+        image_asset_id = self.store.create_image_asset(
+            memory_key="user:U123",
+            message_id="img-detail",
+            sha256=saved.sha256,
+            mime_type=saved.mime_type,
+            size_bytes=saved.size_bytes,
+            path=saved.path,
+            expires_at=saved.expires_at,
+        )
+        self.store.attach_image_assets_to_run(previous_run_id, [image_asset_id])
+        self.store.update_image_asset_status(
+            image_asset_id,
+            status="analyzed",
+            analysis_summary={
+                "summary": "一張餐桌上有幾杯飲品。",
+                "visible_objects": ["餐桌", "飲品", "杯子"],
+                "visible_text": [],
+                "scene_or_context": "咖啡廳桌面",
+                "suggested_followups": ["幫我判斷這是什麼飲料"],
+            },
+        )
+
+        current_run_id, _ = self.store.create_task_run(
+            memory_key="user:U123",
+            user_goal="上面有什麼字",
+            normalized_goal="上面有什麼字",
+            source_payload={},
+            external_event_id="evt-img-detail-followup",
+        )
+        runtime = SecretaryRuntime(
+            settings=FakeSettings(),
+            store=self.store,
+            messenger=self.messenger,
+            agent_client=FakeAgentClient([]),
+            google_client=FakeGoogleClient(),
+            browser_automation=FakeBrowserAutomation(),
+        )
+        current_run = runtime.store.get_task_run(current_run_id)
+        context = self.store.build_runtime_context(current_run_id, "user:U123")
+        runtime._maybe_attach_recent_image_context(current_run, context)
+
+        self.assertIn("recent_image_summary", context)
+        self.assertTrue(context.get("image_assets"))
+        self.assertEqual(context["image_assets"][0]["message_id"], "img-detail")
+
     def test_reset_clears_history_and_profile(self):
         self.store.append_history("user:U123", "user", "hello")
         self.store.update_profile("user:U123", {"budget": "mid"})

@@ -825,6 +825,21 @@ class SQLiteStore:
                     (run_id,),
                 ).fetchall()
 
+    def get_recent_image_assets(self, memory_key: str, *, limit: int = 3) -> List[sqlite3.Row]:
+        with self.lock:
+            with self.connect() as conn:
+                return conn.execute(
+                    """
+                    SELECT *
+                    FROM image_assets
+                    WHERE memory_key = ?
+                      AND status NOT IN ('deleted', 'missing', 'expired')
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (memory_key, limit),
+                ).fetchall()
+
     def update_image_asset_status(
         self,
         image_asset_id: int,
@@ -1081,12 +1096,35 @@ class SQLiteStore:
                     "expires_at": row["expires_at"],
                 }
             )
+        recent_image_assets = []
+        for row in self.get_recent_image_assets(memory_key, limit=3):
+            if any(int(existing["id"]) == int(row["id"]) for existing in image_assets):
+                continue
+            try:
+                analysis_summary = json.loads(row["analysis_summary_json"] or "{}")
+            except json.JSONDecodeError:
+                analysis_summary = {}
+            recent_image_assets.append(
+                {
+                    "id": row["id"],
+                    "message_id": row["message_id"],
+                    "sha256": row["sha256"],
+                    "mime_type": row["mime_type"],
+                    "size_bytes": row["size_bytes"],
+                    "path": row["path"],
+                    "status": row["status"],
+                    "analysis_summary": analysis_summary,
+                    "created_at": row["created_at"],
+                    "expires_at": row["expires_at"],
+                }
+            )
         return {
             "history": self.history_to_text(memory_key),
             "profile": self.get_profile(memory_key),
             "connected_accounts": accounts,
             "artifacts": artifacts,
             "image_assets": image_assets,
+            "recent_image_assets": recent_image_assets,
             "recent_service_artifacts": recent_service_artifacts,
             "latest_approval_response": approval["response_text"] if approval else "",
         }

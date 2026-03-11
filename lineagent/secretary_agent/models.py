@@ -14,6 +14,7 @@ class InboundMessage:
     quoted_message_id: Optional[str]
     received_at: datetime
     line_event_id: Optional[str]
+    image_asset_ids: List[int] = field(default_factory=list)
 
     @property
     def memory_key(self) -> str:
@@ -83,3 +84,20 @@ class ConnectedAccount:
     session_available: bool = False
     last_verified_at: str = ""
     metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ImageAsset:
+    id: int
+    run_id: Optional[int]
+    memory_key: str
+    message_id: str
+    sha256: str
+    mime_type: str
+    size_bytes: int
+    path: str
+    status: str
+    analysis_summary: Dict[str, Any] = field(default_factory=dict)
+    created_at: str = ""
+    expires_at: str = ""
+    deleted_at: str = ""

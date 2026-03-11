@@ -45,6 +45,7 @@ def normalize_line_message(
     text_override: Optional[str] = None,
     *,
     reply_enabled: bool = True,
+    image_asset_ids: Optional[List[int]] = None,
 ) -> InboundMessage:
     source_id = get_push_target_id(event.source) or "anonymous"
     user_id = getattr(event.source, "user_id", None)
@@ -56,6 +57,7 @@ def normalize_line_message(
         reply_token=event.reply_token,
         reply_enabled=reply_enabled,
         text=(text_override if text_override is not None else (event.message.text or "")).strip(),
+        image_asset_ids=list(image_asset_ids or []),
         quoted_message_id=get_quoted_message_id(event.message),
         received_at=datetime.now(timezone.utc),
         line_event_id=get_line_event_id(event),

@@ -8,6 +8,7 @@ from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.webhooks import (
     AudioMessageContent,
     FileMessageContent,
+    ImageMessageContent,
     LocationMessageContent,
     MessageEvent,
     TextMessageContent,
@@ -19,6 +20,7 @@ from secretary_agent.config import Settings
 from secretary_agent.memory import SQLiteStore
 from secretary_agent.logging_utils import format_log_event
 from secretary_agent.runtime import SecretaryRuntime
+from secretary_agent.image_storage import ImageStorageManager
 from secretary_agent.transport_line import (
     LineMessenger,
     format_location_message,
@@ -58,6 +60,10 @@ runtime = SecretaryRuntime(
     store=store,
     messenger=messenger,
     admin_notifier=admin_notifier,
+)
+image_storage = ImageStorageManager(
+    base_dir=settings.image_storage_dir,
+    retention_days=settings.image_retention_days,
 )
 try:
     audio_transcriber = (
@@ -267,6 +273,11 @@ def on_file_message(event: MessageEvent):
     _start_media_processing(event)
 
 
+@handler.add(MessageEvent, message=ImageMessageContent)
+def on_image_message(event: MessageEvent):
+    _start_image_processing(event)
+
+
 def _start_media_processing(event: MessageEvent):
     message_id = getattr(event.message, "id", "")
     source_id = get_push_target_id(event.source)
@@ -456,6 +467,104 @@ def _handle_media_message(event: MessageEvent):
         format_log_event(
             "media_runtime_dispatch",
             message_id=message_id,
+            memory_key=inbound.memory_key,
+            source_id=source_id,
+            user_id=user_id,
+        )
+    )
+    runtime.handle_inbound_message(inbound)
+
+
+def _start_image_processing(event: MessageEvent):
+    message_id = getattr(event.message, "id", "")
+    source_id = get_push_target_id(event.source)
+    user_id = getattr(event.source, "user_id", None)
+    logger.info(
+        format_log_event(
+            "image_ack_sent",
+            message_id=message_id,
+            source_id=source_id,
+            user_id=user_id,
+        )
+    )
+    messenger.reply_text(
+        event.reply_token,
+        "已收到圖片，正在分析，完成後我會主動推送給你。",
+    )
+    threading.Thread(target=_handle_image_message, args=(event,), daemon=True).start()
+
+
+def _handle_image_message(event: MessageEvent):
+    push_target_id = get_push_target_id(event.source)
+    message_id = getattr(event.message, "id", "")
+    source_id = push_target_id
+    user_id = getattr(event.source, "user_id", None)
+    if not push_target_id:
+        logger.error(
+            format_log_event(
+                "image_missing_push_target",
+                message_id=message_id,
+                user_id=user_id,
+            )
+        )
+        return
+    try:
+        image_bytes = messenger.get_message_content(message_id, message_type="image")
+        saved = image_storage.save_image(message_id=message_id, image_bytes=image_bytes)
+        image_asset_id = store.create_image_asset(
+            memory_key=f"user:{user_id}" if user_id else f"target:{source_id}",
+            message_id=message_id,
+            sha256=saved.sha256,
+            mime_type=saved.mime_type,
+            size_bytes=saved.size_bytes,
+            path=saved.path,
+            expires_at=saved.expires_at,
+        )
+        logger.info(
+            format_log_event(
+                "image_processing_started",
+                message_id=message_id,
+                image_asset_id=image_asset_id,
+                mime=saved.mime_type,
+                bytes=saved.size_bytes,
+                source_id=source_id,
+                user_id=user_id,
+            )
+        )
+    except Exception as err:
+        logger.exception(
+            format_log_event(
+                "image_processing_failed",
+                message_id=message_id,
+                source_id=source_id,
+                user_id=user_id,
+                error_type=type(err).__name__,
+            )
+        )
+        admin_notifier.notify_system_error(
+            event="image_processing_failed",
+            summary="圖片訊息處理失敗",
+            fields={
+                "message_id": message_id,
+                "source_id": source_id,
+                "user_id": user_id,
+                "error_type": type(err).__name__,
+            },
+        )
+        messenger.push_text(push_target_id, USER_SAFE_SYSTEM_ERROR_TEXT)
+        return
+
+    inbound = normalize_line_message(
+        event,
+        text_override="請先做通用看圖分析，說明圖片內容、可提取的重點，以及是否需要我再補充用途。",
+        reply_enabled=False,
+        image_asset_ids=[image_asset_id],
+    )
+    logger.info(
+        format_log_event(
+            "image_runtime_dispatch",
+            message_id=message_id,
+            image_asset_id=image_asset_id,
             memory_key=inbound.memory_key,
             source_id=source_id,
             user_id=user_id,

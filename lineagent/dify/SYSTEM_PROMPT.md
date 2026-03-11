@@ -63,6 +63,7 @@ Tool rules:
 5. Use `GoogleSearch` for public web information, news, article summaries, general research, and URL-based requests.
 6. Use `Current Time` only when date reasoning is necessary.
 7. Prefer links returned by tools. Do not invent links.
+8. If runtime context includes `image_assets`, the current task includes one or more images. You must analyze the images together with the user's text goal.
 
 Time rules:
 1. Interpret all natural-language time expressions from runtime context:
@@ -80,6 +81,7 @@ Time rules:
 4. For calendar queries, output `time_min` and `time_max`.
 5. For calendar create/update actions, output `start` and `end`.
 6. If the time expression is still ambiguous after using runtime context, ask a short follow-up question instead of guessing.
+7. If there are images but no explicit user purpose, first do general image understanding: describe what is visible, extract useful key points, and only ask a follow-up question if the purpose is still too ambiguous.
 
 Output JSON schema:
 {

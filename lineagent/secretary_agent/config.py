@@ -20,6 +20,8 @@ class Settings:
     diarization_speakers_expected: int
     public_base_url: str
     artifact_output_dir: str
+    image_storage_dir: str
+    image_retention_days: int
     database_path: str
     worker_poll_seconds: float
     short_context_ttl_days: int
@@ -57,6 +59,11 @@ class Settings:
                 "ARTIFACT_OUTPUT_DIR",
                 os.path.join(base_dir, "output", "doc"),
             ).strip(),
+            image_storage_dir=os.getenv(
+                "IMAGE_STORAGE_DIR",
+                os.path.join(base_dir, "storage", "images"),
+            ).strip(),
+            image_retention_days=int(os.getenv("IMAGE_RETENTION_DAYS", "7")),
             database_path=os.getenv(
                 "BOT_DB_PATH",
                 os.path.join(base_dir, "bot_memory.sqlite3"),

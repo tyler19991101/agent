@@ -1,9 +1,10 @@
 import os
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from secretary_agent.audio_transcriber import format_diarized_transcript, format_timestamp
+from secretary_agent.image_storage import ImageStorageManager
 from secretary_agent.memory import SQLiteStore
 from secretary_agent.models import InboundMessage, PlannerResult, SpeakerUtterance
 from secretary_agent.runtime import SecretaryRuntime
@@ -23,6 +24,8 @@ class FakeSettings:
     short_context_ttl_days = 14
     public_base_url = "https://example.com"
     artifact_output_dir = ""
+    image_storage_dir = ""
+    image_retention_days = 7
     google_client_id = ""
     google_client_secret = ""
     google_redirect_uri = ""
@@ -186,12 +189,13 @@ class FakeAgentClient:
         self.results = list(results)
         self.calls = []
 
-    def plan(self, *, memory_key, user_goal, runtime_context):
+    def plan(self, *, memory_key, user_goal, runtime_context, files=None):
         self.calls.append(
             {
                 "memory_key": memory_key,
                 "user_goal": user_goal,
                 "runtime_context": runtime_context,
+                "files": files or [],
             }
         )
         if not self.results:
@@ -203,7 +207,7 @@ class RaisingAgentClient:
     def __init__(self, error):
         self.error = error
 
-    def plan(self, *, memory_key, user_goal, runtime_context):
+    def plan(self, *, memory_key, user_goal, runtime_context, files=None):
         raise self.error
 
 
@@ -352,6 +356,61 @@ class SecretaryRuntimeTest(unittest.TestCase):
         pushed = self.messenger.pushes[0][1]
         self.assertTrue(pushed.startswith("已完成，請下載檔案："))
         self.assertNotIn("這是整理好的會議摘要", pushed)
+
+    def test_store_build_runtime_context_includes_image_assets(self):
+        image_dir = os.path.join(self.tempdir.name, "images")
+        storage = ImageStorageManager(base_dir=image_dir, retention_days=7)
+        saved = storage.save_image(message_id="img-1", image_bytes=b"\x89PNG\r\n\x1a\nfakepng")
+        run_id, _ = self.store.create_task_run(
+            memory_key="user:U123",
+            user_goal="請分析圖片",
+            normalized_goal="請分析圖片",
+            source_payload={},
+            external_event_id="evt-img-1",
+        )
+        image_asset_id = self.store.create_image_asset(
+            memory_key="user:U123",
+            message_id="img-1",
+            sha256=saved.sha256,
+            mime_type=saved.mime_type,
+            size_bytes=saved.size_bytes,
+            path=saved.path,
+            expires_at=saved.expires_at,
+        )
+        self.store.attach_image_assets_to_run(run_id, [image_asset_id])
+
+        context = self.store.build_runtime_context(run_id, "user:U123")
+        self.assertEqual(len(context["image_assets"]), 1)
+        self.assertEqual(context["image_assets"][0]["message_id"], "img-1")
+        self.assertEqual(context["image_assets"][0]["mime_type"], "image/png")
+
+    def test_runtime_cleanup_expired_images_marks_deleted(self):
+        image_dir = os.path.join(self.tempdir.name, "images")
+        storage = ImageStorageManager(base_dir=image_dir, retention_days=7)
+        saved = storage.save_image(message_id="img-expired", image_bytes=b"\xff\xd8\xffjpeg")
+        image_asset_id = self.store.create_image_asset(
+            memory_key="user:U123",
+            message_id="img-expired",
+            sha256=saved.sha256,
+            mime_type=saved.mime_type,
+            size_bytes=saved.size_bytes,
+            path=saved.path,
+            expires_at=(datetime.now(timezone.utc) - timedelta(days=1)).isoformat(),
+        )
+        runtime = SecretaryRuntime(
+            settings=FakeSettings(),
+            store=self.store,
+            messenger=self.messenger,
+            agent_client=FakeAgentClient([PlannerResult(final_reply="ok")]),
+            google_client=FakeGoogleClient(),
+            browser_automation=FakeBrowserAutomation(),
+        )
+
+        runtime._cleanup_expired_image_assets()
+        self.assertFalse(os.path.exists(saved.path))
+        with self.store.connect() as conn:
+            row = conn.execute("SELECT status FROM image_assets WHERE id = ?", (image_asset_id,)).fetchone()
+        self.assertEqual(row["status"], "deleted")
 
     def test_reset_clears_history_and_profile(self):
         self.store.append_history("user:U123", "user", "hello")

@@ -39,9 +39,16 @@ class DifyAgentClient:
         self.base_url = base_url.rstrip("/")
         self.user_prefix = user_prefix
 
-    def plan(self, *, memory_key: str, user_goal: str, runtime_context: Dict[str, Any]) -> PlannerResult:
+    def plan(
+        self,
+        *,
+        memory_key: str,
+        user_goal: str,
+        runtime_context: Dict[str, Any],
+        files: Optional[List[Dict[str, Any]]] = None,
+    ) -> PlannerResult:
         prompt = self._build_prompt(user_goal=user_goal, runtime_context=runtime_context)
-        answer = self._chat(query=prompt, user=f"{self.user_prefix}:{memory_key}")
+        answer = self._chat(query=prompt, user=f"{self.user_prefix}:{memory_key}", files=files or [])
         return self._parse_answer(answer)
 
     def audio_to_text(self, *, memory_key: str, audio_bytes: bytes, filename: str, mime_type: str) -> str:
@@ -79,16 +86,41 @@ class DifyAgentClient:
             f"目前執行上下文：\n{context_json}"
         )
 
-    def _chat(self, *, query: str, user: str) -> str:
-        payload = json.dumps(
-            {
-                "inputs": {},
-                "query": query,
-                "response_mode": "blocking",
-                "conversation_id": "",
-                "user": user,
-            }
-        ).encode("utf-8")
+    def upload_file(
+        self,
+        *,
+        memory_key: str,
+        file_bytes: bytes,
+        filename: str,
+        mime_type: str,
+    ) -> Dict[str, Any]:
+        user = f"{self.user_prefix}:{memory_key}"
+        payload, content_type = self._build_multipart_form_data(
+            fields={"user": user},
+            files={"file": (filename, file_bytes, mime_type)},
+        )
+        req = Request(
+            f"{self.base_url}/files/upload",
+            data=payload,
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": content_type,
+                "Accept": "application/json",
+                "User-Agent": "curl/8.7.1",
+            },
+            method="POST",
+        )
+        try:
+            with urlopen(req, timeout=90) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except HTTPError as err:
+            detail = err.read().decode("utf-8", errors="ignore")
+            raise RuntimeError(f"Dify HTTP error {err.code}: {detail}") from err
+        except URLError as err:
+            raise RuntimeError(f"Dify connection error: {err}") from err
+
+    def _chat(self, *, query: str, user: str, files: List[Dict[str, Any]]) -> str:
+        payload = json.dumps(self._build_chat_payload(query=query, user=user, files=files)).encode("utf-8")
         req = Request(
             f"{self.base_url}/chat-messages",
             data=payload,
@@ -109,6 +141,17 @@ class DifyAgentClient:
             raise RuntimeError(f"Dify HTTP error {err.code}: {detail}") from err
         except URLError as err:
             raise RuntimeError(f"Dify connection error: {err}") from err
+
+    @staticmethod
+    def _build_chat_payload(*, query: str, user: str, files: List[Dict[str, Any]]) -> Dict[str, Any]:
+        return {
+            "inputs": {},
+            "query": query,
+            "response_mode": "blocking",
+            "conversation_id": "",
+            "user": user,
+            "files": files,
+        }
 
     def _parse_answer(self, answer: str) -> PlannerResult:
         try:

@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import time
 from datetime import datetime, timezone
 from threading import Event, Thread
@@ -62,10 +63,12 @@ class SecretaryRuntime:
         self.admin_notifier = admin_notifier
         self._active_run_id_for_service_artifacts = 0
         self.current_memory_key_for_resolution = ""
+        self._last_image_cleanup_at = 0.0
 
     def start(self) -> None:
         if self.worker and self.worker.is_alive():
             return
+        self._cleanup_expired_image_assets()
         self.worker = Thread(target=self._worker_loop, daemon=True)
         self.worker.start()
 
@@ -217,6 +220,7 @@ class SecretaryRuntime:
             },
             external_event_id=inbound.line_event_id,
         )
+        self.store.attach_image_assets_to_run(run_id, inbound.image_asset_ids)
         self.store.add_artifact(
             run_id,
             kind="inbound_message",
@@ -260,6 +264,7 @@ class SecretaryRuntime:
 
     def _worker_loop(self) -> None:
         while not self.stop_event.is_set():
+            self._maybe_cleanup_expired_image_assets()
             processed = self.process_next_run()
             if not processed:
                 time.sleep(self.settings.worker_poll_seconds)
@@ -282,6 +287,7 @@ class SecretaryRuntime:
             context["current_date_local"] = current_local.date().isoformat()
             context["current_timezone"] = str(current_local.tzinfo or "UTC")
             planning_goal = self._build_planning_goal(run.user_goal, context)
+            dify_files = self._prepare_dify_image_files(run, context)
             self.store.add_step(
                 run.id,
                 step_type="plan",
@@ -293,12 +299,14 @@ class SecretaryRuntime:
                 memory_key=run.memory_key,
                 user_goal=planning_goal,
                 runtime_context=context,
+                files=dify_files,
             )
             plan = self._replan_if_google_query_contract_missing(
                 run=run,
                 planning_goal=planning_goal,
                 runtime_context=context,
                 plan=plan,
+                files=dify_files,
             )
             self.logger.info(
                 format_log_event(
@@ -394,6 +402,7 @@ class SecretaryRuntime:
                 else:
                     final_text = self._append_artifact_links(final_text, generated_artifacts)
             self.store.add_artifact(run.id, kind="final_report", content=final_text)
+            self._update_image_analysis_summary(run.id, plan, final_text)
             self.store.update_run_status(
                 run.id,
                 status="completed",
@@ -456,6 +465,8 @@ class SecretaryRuntime:
                 )
 
     def _build_planning_goal(self, user_goal: str, context: Dict[str, Any]) -> str:
+        if context.get("image_assets") and not user_goal.strip():
+            return "請先做通用看圖分析，說明圖片內容、可提取的重點，以及是否需要我再補充用途。"
         artifacts = context.get("artifacts", [])
         approval_responses = [
             str(item.get("content", "")).strip()
@@ -510,6 +521,7 @@ class SecretaryRuntime:
         planning_goal: str,
         runtime_context: Dict[str, Any],
         plan: PlannerResult,
+        files: List[Dict[str, Any]],
     ) -> PlannerResult:
         if not self._needs_google_query_contract_retry(run.user_goal, plan):
             return plan
@@ -525,6 +537,7 @@ class SecretaryRuntime:
             memory_key=run.memory_key,
             user_goal=repair_goal,
             runtime_context=runtime_context,
+            files=files,
         )
         self.logger.info(
             format_log_event(
@@ -536,6 +549,70 @@ class SecretaryRuntime:
             )
         )
         return repaired_plan
+
+    def _prepare_dify_image_files(self, run: TaskRun, runtime_context: Dict[str, Any]) -> List[Dict[str, Any]]:
+        image_assets = runtime_context.get("image_assets", []) or []
+        prepared_files: List[Dict[str, Any]] = []
+        for asset in image_assets:
+            path = str(asset.get("path", "")).strip()
+            if not path or not os.path.isfile(path):
+                self.store.mark_image_asset_missing(int(asset.get("id", 0)))
+                continue
+            with open(path, "rb") as file_obj:
+                file_bytes = file_obj.read()
+            upload = self.agent_client.upload_file(
+                memory_key=run.memory_key,
+                file_bytes=file_bytes,
+                filename=os.path.basename(path),
+                mime_type=str(asset.get("mime_type", "image/jpeg")),
+            )
+            upload_id = str(upload.get("id", "")).strip()
+            if not upload_id:
+                raise RuntimeError("Dify image upload did not return a file id")
+            prepared_files.append(
+                {
+                    "type": "image",
+                    "transfer_method": "local_file",
+                    "upload_file_id": upload_id,
+                }
+            )
+        return prepared_files
+
+    def _update_image_analysis_summary(self, run_id: int, plan: PlannerResult, final_text: str) -> None:
+        image_assets = self.store.get_image_assets_for_run(run_id)
+        if not image_assets:
+            return
+        summary = {
+            "task_type": plan.task_type,
+            "goal_summary": plan.goal_summary,
+            "final_reply": final_text[:2000],
+        }
+        for row in image_assets:
+            self.store.update_image_asset_status(
+                int(row["id"]),
+                status="analyzed",
+                analysis_summary=summary,
+            )
+
+    def _maybe_cleanup_expired_image_assets(self) -> None:
+        now = time.time()
+        if now - self._last_image_cleanup_at < 300:
+            return
+        self._cleanup_expired_image_assets()
+        self._last_image_cleanup_at = now
+
+    def _cleanup_expired_image_assets(self) -> None:
+        for row in self.store.list_expired_image_assets():
+            path = str(row["path"] or "")
+            if path and os.path.exists(path):
+                os.remove(path)
+                self.store.update_image_asset_status(
+                    int(row["id"]),
+                    status="deleted",
+                    deleted_at=datetime.utcnow().isoformat(),
+                )
+            else:
+                self.store.mark_image_asset_missing(int(row["id"]))
 
     @staticmethod
     def _needs_google_query_contract_retry(user_goal: str, plan: PlannerResult) -> bool:

@@ -83,6 +83,25 @@ class SQLiteStore:
                     );
                     CREATE INDEX IF NOT EXISTS idx_artifacts_run ON artifacts(run_id, id);
 
+                    CREATE TABLE IF NOT EXISTS image_assets (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        run_id INTEGER,
+                        memory_key TEXT NOT NULL,
+                        message_id TEXT NOT NULL,
+                        sha256 TEXT NOT NULL,
+                        mime_type TEXT NOT NULL,
+                        size_bytes INTEGER NOT NULL,
+                        path TEXT NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'cached',
+                        analysis_summary_json TEXT NOT NULL DEFAULT '{}',
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        expires_at DATETIME NOT NULL,
+                        deleted_at DATETIME
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_image_assets_run ON image_assets(run_id, id);
+                    CREATE INDEX IF NOT EXISTS idx_image_assets_memory ON image_assets(memory_key, created_at DESC);
+                    CREATE INDEX IF NOT EXISTS idx_image_assets_expiry ON image_assets(status, expires_at);
+
                     CREATE TABLE IF NOT EXISTS user_profiles (
                         memory_key TEXT PRIMARY KEY,
                         profile_json TEXT NOT NULL,
@@ -216,6 +235,14 @@ class SQLiteStore:
                 for run_id in stale_run_ids:
                     conn.execute("DELETE FROM task_steps WHERE run_id = ?", (run_id,))
                     conn.execute("DELETE FROM artifacts WHERE run_id = ?", (run_id,))
+                    conn.execute(
+                        """
+                        UPDATE image_assets
+                        SET status = CASE WHEN status = 'deleted' THEN status ELSE 'expired' END
+                        WHERE run_id = ? AND status NOT IN ('deleted', 'missing')
+                        """,
+                        (run_id,),
+                    )
                     conn.execute("DELETE FROM pending_approvals WHERE run_id = ?", (run_id,))
                 if stale_run_ids:
                     placeholders = ",".join("?" for _ in stale_run_ids)
@@ -752,6 +779,96 @@ class SQLiteStore:
                 )
                 conn.commit()
 
+    def create_image_asset(
+        self,
+        *,
+        memory_key: str,
+        message_id: str,
+        sha256: str,
+        mime_type: str,
+        size_bytes: int,
+        path: str,
+        expires_at: str,
+        run_id: Optional[int] = None,
+    ) -> int:
+        with self.lock:
+            with self.connect() as conn:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO image_assets(
+                        run_id, memory_key, message_id, sha256, mime_type, size_bytes, path, status, expires_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 'cached', ?)
+                    """,
+                    (run_id, memory_key, message_id, sha256, mime_type, size_bytes, path, expires_at),
+                )
+                conn.commit()
+                return int(cursor.lastrowid)
+
+    def attach_image_assets_to_run(self, run_id: int, image_asset_ids: List[int]) -> None:
+        if not image_asset_ids:
+            return
+        placeholders = ",".join("?" for _ in image_asset_ids)
+        with self.lock:
+            with self.connect() as conn:
+                conn.execute(
+                    f"UPDATE image_assets SET run_id = ? WHERE id IN ({placeholders})",
+                    (run_id, *image_asset_ids),
+                )
+                conn.commit()
+
+    def get_image_assets_for_run(self, run_id: int) -> List[sqlite3.Row]:
+        with self.lock:
+            with self.connect() as conn:
+                return conn.execute(
+                    "SELECT * FROM image_assets WHERE run_id = ? ORDER BY id ASC",
+                    (run_id,),
+                ).fetchall()
+
+    def update_image_asset_status(
+        self,
+        image_asset_id: int,
+        *,
+        status: str,
+        analysis_summary: Optional[Dict[str, Any]] = None,
+        deleted_at: Optional[str] = None,
+    ) -> None:
+        fields = ["status = ?"]
+        params: List[Any] = [status]
+        if analysis_summary is not None:
+            fields.append("analysis_summary_json = ?")
+            params.append(json.dumps(analysis_summary, ensure_ascii=False))
+        if deleted_at is not None:
+            fields.append("deleted_at = ?")
+            params.append(deleted_at)
+        params.append(image_asset_id)
+        with self.lock:
+            with self.connect() as conn:
+                conn.execute(
+                    f"UPDATE image_assets SET {', '.join(fields)} WHERE id = ?",
+                    tuple(params),
+                )
+                conn.commit()
+
+    def list_expired_image_assets(self) -> List[sqlite3.Row]:
+        with self.lock:
+            with self.connect() as conn:
+                return conn.execute(
+                    """
+                    SELECT * FROM image_assets
+                    WHERE status NOT IN ('deleted')
+                      AND expires_at < CURRENT_TIMESTAMP
+                    ORDER BY id ASC
+                    """
+                ).fetchall()
+
+    def mark_image_asset_missing(self, image_asset_id: int) -> None:
+        self.update_image_asset_status(
+            image_asset_id,
+            status="missing",
+            deleted_at=datetime.utcnow().isoformat(),
+        )
+
     def get_artifacts(self, run_id: int, kind: Optional[str] = None) -> List[sqlite3.Row]:
         query = "SELECT * FROM artifacts WHERE run_id = ?"
         params: List[Any] = [run_id]
@@ -944,11 +1061,32 @@ class SQLiteStore:
                     "metadata": metadata,
                 }
             )
+        image_assets = []
+        for row in self.get_image_assets_for_run(run_id):
+            try:
+                analysis_summary = json.loads(row["analysis_summary_json"] or "{}")
+            except json.JSONDecodeError:
+                analysis_summary = {}
+            image_assets.append(
+                {
+                    "id": row["id"],
+                    "message_id": row["message_id"],
+                    "sha256": row["sha256"],
+                    "mime_type": row["mime_type"],
+                    "size_bytes": row["size_bytes"],
+                    "path": row["path"],
+                    "status": row["status"],
+                    "analysis_summary": analysis_summary,
+                    "created_at": row["created_at"],
+                    "expires_at": row["expires_at"],
+                }
+            )
         return {
             "history": self.history_to_text(memory_key),
             "profile": self.get_profile(memory_key),
             "connected_accounts": accounts,
             "artifacts": artifacts,
+            "image_assets": image_assets,
             "recent_service_artifacts": recent_service_artifacts,
             "latest_approval_response": approval["response_text"] if approval else "",
         }

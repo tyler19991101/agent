@@ -145,6 +145,24 @@ class DifyAgentClientParseAnswerTest(unittest.TestCase):
         self.assertIn('"current_date_local": "2026-03-08"', prompt)
         self.assertNotIn("Execution contract:", prompt)
 
+    def test_build_chat_payload_includes_uploaded_files(self):
+        client = self.make_client()
+        payload = client._build_chat_payload(
+            query="請分析這張圖",
+            user="line:user:U123",
+            files=[
+                {
+                    "type": "image",
+                    "transfer_method": "local_file",
+                    "upload_file_id": "file-123",
+                }
+            ],
+        )
+
+        self.assertEqual(payload["query"], "請分析這張圖")
+        self.assertEqual(payload["user"], "line:user:U123")
+        self.assertEqual(payload["files"][0]["upload_file_id"], "file-123")
+
 
 if __name__ == "__main__":
     unittest.main()

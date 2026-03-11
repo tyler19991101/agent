@@ -10,7 +10,13 @@ from secretary_agent.utils import extract_json_object, normalize_bool
 
 class DifyAgentClient:
     _ALLOWED_CONVERSATION_MODES = {"new_task", "continue_task", "casual_reply"}
-    _ALLOWED_CONTEXT_USAGE = {"none", "recent_task", "pending_approval", "quoted_message"}
+    _ALLOWED_CONTEXT_USAGE = {
+        "none",
+        "recent_task",
+        "pending_approval",
+        "quoted_message",
+        "recent_image",
+    }
     _ALLOWED_CALENDAR_OPERATIONS = {
         "create_event",
         "update_event",

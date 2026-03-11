@@ -149,6 +149,28 @@ flowchart LR
     R --> P["LINE push / reply"]
 ```
 
+## 整體流程圖
+
+```mermaid
+flowchart TD
+    A["使用者從 LINE 傳入需求<br/>文字 / 語音 / 圖片 / 檔案 / 位置"] --> B["bot.py 接收 webhook"]
+    B --> C["依訊息型態做前置處理<br/>文字直接進 runtime<br/>語音先轉錄<br/>圖片先下載與快取"]
+    C --> D["runtime 建立 task run"]
+    D --> E["立即回覆 ACK 或處理中訊息"]
+    D --> F["背景 worker 開始處理"]
+    F --> G["組合 runtime context<br/>歷史對話 / 長期記憶 / 最近 artifacts / 圖片資產"]
+    G --> H["呼叫 Dify planner"]
+    H --> I["Dify 輸出 JSON contract<br/>conversation_mode / context_usage / actions"]
+    I --> J{"是否需要 backend action?"}
+    J -- 否 --> K["直接組合 user-facing 回覆"]
+    J -- 是 --> L["backend 執行對應動作<br/>Google / 記憶 / 檔案輸出 / 其他"]
+    L --> M["寫回 SQLite 與 artifacts"]
+    M --> N["產生最終結果"]
+    K --> O["回覆或推送給 LINE 使用者"]
+    N --> O
+    O --> P["log / admin alert / 後續追蹤"]
+```
+
 ## 核心資料流
 
 ### 1. 文字任務流程

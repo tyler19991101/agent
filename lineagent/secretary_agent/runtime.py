@@ -28,6 +28,7 @@ from secretary_agent.utils import (
 
 class SecretaryRuntime:
     USER_SAFE_ERROR_TEXT = "目前系統發生異常，已通報 IT 人員協助處理，請稍後再試。"
+    DEFAULT_IMAGE_ANALYSIS_GOAL = "請先做通用看圖分析，說明圖片內容、可提取的重點，以及是否需要我再補充用途。"
 
     def __init__(
         self,
@@ -474,7 +475,7 @@ class SecretaryRuntime:
 
     def _build_planning_goal(self, user_goal: str, context: Dict[str, Any]) -> str:
         if context.get("image_assets") and not user_goal.strip():
-            return "請先做通用看圖分析，說明圖片內容、可提取的重點，以及是否需要我再補充用途。"
+            return self.DEFAULT_IMAGE_ANALYSIS_GOAL
         recent_image_summary = context.get("recent_image_summary")
         if recent_image_summary and user_goal.strip():
             summary_text = str(recent_image_summary.get("summary", "")).strip()
@@ -592,7 +593,9 @@ class SecretaryRuntime:
     ) -> PlannerResult:
         image_assets = runtime_context.get("image_assets") or []
         user_goal = run.user_goal.strip()
-        if not image_assets or user_goal:
+        if not image_assets or (
+            user_goal and user_goal != self.DEFAULT_IMAGE_ANALYSIS_GOAL
+        ):
             return plan
         if not (plan.requires_approval or plan.needed_inputs or plan.missing_info):
             return plan

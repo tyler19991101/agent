@@ -590,8 +590,8 @@ class SecretaryRuntimeTest(unittest.TestCase):
         saved = storage.save_image(message_id="img-repair", image_bytes=b"\x89PNG\r\n\x1a\nimg")
         run_id, _ = self.store.create_task_run(
             memory_key="user:U123",
-            user_goal="",
-            normalized_goal="",
+            user_goal=SecretaryRuntime.DEFAULT_IMAGE_ANALYSIS_GOAL,
+            normalized_goal=SecretaryRuntime.DEFAULT_IMAGE_ANALYSIS_GOAL,
             source_payload={},
             external_event_id="evt-img-repair",
         )
@@ -644,8 +644,8 @@ class SecretaryRuntimeTest(unittest.TestCase):
         saved = storage.save_image(message_id="img-fallback", image_bytes=b"\x89PNG\r\n\x1a\nimg")
         run_id, _ = self.store.create_task_run(
             memory_key="user:U123",
-            user_goal="",
-            normalized_goal="",
+            user_goal=SecretaryRuntime.DEFAULT_IMAGE_ANALYSIS_GOAL,
+            normalized_goal=SecretaryRuntime.DEFAULT_IMAGE_ANALYSIS_GOAL,
             source_payload={},
             external_event_id="evt-img-fallback",
         )

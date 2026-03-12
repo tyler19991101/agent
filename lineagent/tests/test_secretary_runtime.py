@@ -188,6 +188,18 @@ class FakeAgentClient:
     def __init__(self, results):
         self.results = list(results)
         self.calls = []
+        self.upload_calls = []
+
+    def upload_file(self, *, memory_key, file_bytes, filename, mime_type):
+        self.upload_calls.append(
+            {
+                "memory_key": memory_key,
+                "filename": filename,
+                "mime_type": mime_type,
+                "size": len(file_bytes),
+            }
+        )
+        return {"id": f"upload-{len(self.upload_calls)}"}
 
     def plan(self, *, memory_key, user_goal, runtime_context, files=None):
         self.calls.append(
@@ -571,6 +583,116 @@ class SecretaryRuntimeTest(unittest.TestCase):
         self.assertIn("recent_image_summary", context)
         self.assertTrue(context.get("image_assets"))
         self.assertEqual(context["image_assets"][0]["message_id"], "img-detail")
+
+    def test_image_only_missing_info_is_replanned_without_waiting_approval(self):
+        image_dir = os.path.join(self.tempdir.name, "images")
+        storage = ImageStorageManager(base_dir=image_dir, retention_days=7)
+        saved = storage.save_image(message_id="img-repair", image_bytes=b"\x89PNG\r\n\x1a\nimg")
+        run_id, _ = self.store.create_task_run(
+            memory_key="user:U123",
+            user_goal="",
+            normalized_goal="",
+            source_payload={},
+            external_event_id="evt-img-repair",
+        )
+        image_asset_id = self.store.create_image_asset(
+            memory_key="user:U123",
+            message_id="img-repair",
+            sha256=saved.sha256,
+            mime_type=saved.mime_type,
+            size_bytes=saved.size_bytes,
+            path=saved.path,
+            expires_at=saved.expires_at,
+        )
+        self.store.attach_image_assets_to_run(run_id, [image_asset_id])
+        agent = FakeAgentClient(
+            [
+                PlannerResult(
+                    task_type="information_request",
+                    requires_approval=True,
+                    approval_type="missing_info",
+                    approval_prompt="請告訴我你想看什麼。",
+                    missing_info=["用途"],
+                ),
+                PlannerResult(
+                    task_type="information_request",
+                    goal_summary="通用看圖分析",
+                    final_reply="這是一張貓咪的近拍照片。",
+                ),
+            ]
+        )
+        runtime = SecretaryRuntime(
+            settings=FakeSettings(),
+            store=self.store,
+            messenger=self.messenger,
+            agent_client=agent,
+            google_client=FakeGoogleClient(),
+            browser_automation=FakeBrowserAutomation(),
+        )
+
+        processed = runtime.process_next_run()
+
+        self.assertTrue(processed)
+        self.assertEqual(len(agent.calls), 2)
+        self.assertIsNone(self.store.get_open_approval("user:U123"))
+        self.assertEqual(len(self.messenger.pushes), 1)
+        self.assertIn("這是一張貓咪的近拍照片", self.messenger.pushes[0][1])
+
+    def test_image_only_missing_info_falls_back_when_repair_still_bad(self):
+        image_dir = os.path.join(self.tempdir.name, "images")
+        storage = ImageStorageManager(base_dir=image_dir, retention_days=7)
+        saved = storage.save_image(message_id="img-fallback", image_bytes=b"\x89PNG\r\n\x1a\nimg")
+        run_id, _ = self.store.create_task_run(
+            memory_key="user:U123",
+            user_goal="",
+            normalized_goal="",
+            source_payload={},
+            external_event_id="evt-img-fallback",
+        )
+        image_asset_id = self.store.create_image_asset(
+            memory_key="user:U123",
+            message_id="img-fallback",
+            sha256=saved.sha256,
+            mime_type=saved.mime_type,
+            size_bytes=saved.size_bytes,
+            path=saved.path,
+            expires_at=saved.expires_at,
+        )
+        self.store.attach_image_assets_to_run(run_id, [image_asset_id])
+        agent = FakeAgentClient(
+            [
+                PlannerResult(
+                    task_type="information_request",
+                    requires_approval=True,
+                    approval_type="missing_info",
+                    approval_prompt="請告訴我你想看什麼。",
+                    missing_info=["用途"],
+                ),
+                PlannerResult(
+                    task_type="information_request",
+                    requires_approval=True,
+                    approval_type="missing_info",
+                    approval_prompt="還是請補充你的用途。",
+                    missing_info=["用途"],
+                ),
+            ]
+        )
+        runtime = SecretaryRuntime(
+            settings=FakeSettings(),
+            store=self.store,
+            messenger=self.messenger,
+            agent_client=agent,
+            google_client=FakeGoogleClient(),
+            browser_automation=FakeBrowserAutomation(),
+        )
+
+        processed = runtime.process_next_run()
+
+        self.assertTrue(processed)
+        self.assertEqual(len(agent.calls), 2)
+        self.assertIsNone(self.store.get_open_approval("user:U123"))
+        self.assertEqual(len(self.messenger.pushes), 1)
+        self.assertIn("我已收到這張圖片", self.messenger.pushes[0][1])
 
     def test_reset_clears_history_and_profile(self):
         self.store.append_history("user:U123", "user", "hello")

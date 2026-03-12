@@ -309,6 +309,13 @@ class SecretaryRuntime:
                 plan=plan,
                 files=dify_files,
             )
+            plan = self._repair_image_missing_info_plan(
+                run=run,
+                planning_goal=planning_goal,
+                runtime_context=context,
+                plan=plan,
+                files=dify_files,
+            )
             self.logger.info(
                 format_log_event(
                     "task_plan_completed",
@@ -573,6 +580,69 @@ class SecretaryRuntime:
             )
         )
         return repaired_plan
+
+    def _repair_image_missing_info_plan(
+        self,
+        *,
+        run: TaskRun,
+        planning_goal: str,
+        runtime_context: Dict[str, Any],
+        plan: PlannerResult,
+        files: List[Dict[str, Any]],
+    ) -> PlannerResult:
+        image_assets = runtime_context.get("image_assets") or []
+        user_goal = run.user_goal.strip()
+        if not image_assets or user_goal:
+            return plan
+        if not (plan.requires_approval or plan.needed_inputs or plan.missing_info):
+            return plan
+
+        repair_goal = (
+            f"{planning_goal}\n\n"
+            "補充要求：這是一個純圖片上傳任務，圖片有效且可讀。"
+            "不要把『沒有文字問題』判成缺資料。"
+            "你必須先直接提供第一輪通用看圖分析，內容至少包含可見主體、場景、可辨識文字與可能用途。"
+            "只有在圖片本身無法辨識、毀損、空白，或真的無法從圖中提取任何內容時，才可以 requires_approval=true。"
+        )
+        repaired_plan = self.agent_client.plan(
+            memory_key=run.memory_key,
+            user_goal=repair_goal,
+            runtime_context=runtime_context,
+            files=files,
+        )
+        if not (repaired_plan.requires_approval or repaired_plan.needed_inputs or repaired_plan.missing_info):
+            self.logger.info(
+                format_log_event(
+                    "task_replanned_for_image_contract",
+                    run_id=run.id,
+                    memory_key=run.memory_key,
+                    original_requires_approval=plan.requires_approval,
+                    repaired_requires_approval=repaired_plan.requires_approval,
+                )
+            )
+            return repaired_plan
+
+        fallback_plan = PlannerResult(
+            conversation_mode="new_task",
+            context_usage="none",
+            task_type="information_request",
+            goal_summary="通用看圖分析",
+            final_reply=(
+                "我已收到這張圖片，會先用通用看圖方式幫你整理可見內容、場景與可能重點。"
+                "如果你想知道更具體的細節，例如文字、品牌、位置或用途，也可以直接告訴我。"
+            ),
+            warnings=["模型未依圖片首輪分析合約回覆，已改用系統通用看圖兜底。"],
+        )
+        self.logger.info(
+            format_log_event(
+                "task_fallback_for_image_contract",
+                run_id=run.id,
+                memory_key=run.memory_key,
+                original_requires_approval=plan.requires_approval,
+                repaired_requires_approval=repaired_plan.requires_approval,
+            )
+        )
+        return fallback_plan
 
     def _prepare_dify_image_files(self, run: TaskRun, runtime_context: Dict[str, Any]) -> List[Dict[str, Any]]:
         image_assets = runtime_context.get("image_assets", []) or []
